@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI Shield — Insider Guard · детект инсайдерской угрозы</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js" crossorigin></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Babel standalone (новые версии) по умолчанию транспилирует JSX в automatic runtime
+  // и эмитит `import {jsx} from "react/jsx-runtime"` → инжектится как classic <script> →
+  // SyntaxError "Cannot use import statement outside a module", React не монтируется.
+  // Регистрируем пресет с classic runtime (React.createElement) — версионно-независимый фикс.
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]],
+  });
+</script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: '#0b0f1a',
+          panel: '#121826',
+          panel2: '#1a2234',
+          edge: '#26324a',
+          accent: '#3b82f6',
+          good: '#22c55e',
+          warn: '#f59e0b',
+          bad: '#ef4444',
+          crit: '#dc2626',
+        },
+        fontFamily: {
+          mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        }
+      }
+    }
+  }
+</script>
+<style>
+  html, body, #root { height: 100%; }
+  body { background: #0b0f1a; color: #e5e9f0; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: #0b0f1a; }
+  ::-webkit-scrollbar-thumb { background: #26324a; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+  .fade-in { animation: fade .25s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px);} to {opacity:1; transform:none;} }
+  .pulse-dot { animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react-classic">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* =====================================================================
+   AI Shield — Insider Guard · прототип для трека AI Shield (id: ai-shield), AFM AI Hackathon 2026
+   Полностью оффлайн. Детерминированный mock-AI (UEBA-граф + эвристики на baseline + scoring + SHAP-like).
+   Опционально: реальный вызов Claude (sonnet) для генерации черновика инцидент-отчёта.
+   ВСЕ ДАННЫЕ СИНТЕТИЧЕСКИЕ. ИИН/ФИО/IP вымышлены. Никаких реальных персональных данных.
+
+   Якорь: утечка 16,3 млн записей РК (июнь 2025) — НЕ взлом периметра, а инсайдер
+   с авторизованным доступом. Периметровый DLP/SIEM такое не ловит: доступ «легальный».
+   Поэтому детект строится на ОТКЛОНЕНИИ от поведенческого baseline самого пользователя (UEBA).
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   СИНТЕТИЧЕСКИЙ ДАТАСЕТ
+   Каждый "инцидент" = подграф доступа {пользователи, ресурсы(БД/таблицы ПДн), хосты}.
+   Событие = ребро графа: {id, user, role, resource, db, host, ip, geo, action, rows, ts, channel}.
+   На аккаунт задан baseline {avg_rows_per_day, work_hours, known_tables} — норма поведения.
+   Легенда: гос-орган / среда АФМ РК, базы ПДн (модель утечки 16,3 млн: ФИО / ИИН / адрес / телефон).
+   --------------------------------------------------------------------- */
+
+const ROLES = { user:'user', resource:'resource', host:'host' };
+
+// Узел-пользователь
+function usr(id, name, role, baseline, tags=[]) {
+  return { id, kind:'user', name, role, baseline, tags };
+}
+// Узел-ресурс (БД / таблица ПДн)
+function rsc(id, label, db, sensitivity, tags=[]) {
+  return { id, kind:'resource', label, db, sensitivity, tags };
+}
+// Узел-хост (рабочая станция / сервер)
+function hst(id, label, zone, tags=[]) {
+  return { id, kind:'host', label, zone, tags };
+}
+
+// Инциденты. Каждый: id, типология, title, факты, узлы (users/resources/hosts), события(events).
+// event: {id, from(user/host), to(resource/host), user, role, resource, db, host, ip, geo, action, rows, ts, channel}
+// from/to задают РЁБРА графа доступа (user→resource, либо user→host→host для бокового движения).
+const CASES = [
+  // 1. MASS_EXFIL — слепок утечки 16,3 млн: аналитик выгружает 80k при baseline 50/день (80x), ночью
+  {
+    id: 'INC-7042',
+    typology: 'mass_exfil',
+    title: 'Массовая выгрузка ПДн: 80 000 записей в 02:14 (baseline 50/день)',
+    channel: 'Журнал доступа БД «Реестр физических лиц» (audit log)',
+    facts: 'Аналитик отдела (роль: analyst) в 02:14 выполняет выборку 80 000 строк из таблицы ФИО/ИИН/адрес при индивидуальном baseline 50 строк/день (×80). Объём сопоставим со слепком утечки 16,3 млн записей. Операция вне рабочих часов, по таблице из его known_tables, но в объёме, физически несовместимом с должностными обязанностями.',
+    source: 'Якорный кейс: утечка 16,3 млн записей РК (июнь 2025) — инсайдер с авторизованным доступом. UEBA: отклонение объёма от персонального baseline (Gartner Market Guide for UEBA; MITRE ATT&CK T1530 Data from Information Repositories).',
+    hub: 'U-ANALYST-3',
+    users: [ usr('U-ANALYST-3', 'Сабит А. (ИИН 8•••••••3201, синт.)', 'analyst', { avg_rows_per_day: 50, work_hours: [9,18], known_tables: ['DB-PERSONS'] }, []) ],
+    resources: [ rsc('DB-PERSONS', 'Реестр физлиц: ФИО / ИИН / адрес', 'persons', 'critical', ['pii']) ],
+    hosts: [ hst('H-WS-12', 'АРМ аналитика', 'office') ],
+    events: [
+      { id:'E-1001', from:'U-ANALYST-3', to:'DB-PERSONS', user:'U-ANALYST-3', role:'analyst', resource:'DB-PERSONS', db:'persons', host:'H-WS-12', ip:'10.20.4.12', geo:'Астана', action:'SELECT', rows:80000, ts:'2026-06-12 02:14', channel:'db' },
+    ],
+  },
+
+  // 2. LATERAL_MOVEMENT — скомпрометированный аккаунт прыгает по 4 хостам до БД физлиц
+  {
+    id: 'INC-7088',
+    typology: 'lateral',
+    title: 'Боковое перемещение: цепочка из 4 хостов до БД физлиц',
+    channel: 'Журналы аутентификации хостов (SSH/RDP audit)',
+    facts: 'Аккаунт поддержки логинится последовательно на 4 хоста (рабочая станция → хост → хост → сервер БД), завершая путь доступом к базе физлиц. Боковое перемещение по инфраструктуре — типовой почерк скомпрометированного аккаунта или инсайдера, обходящего сегментацию сети.',
+    source: 'MITRE ATT&CK TA0008 Lateral Movement (T1021 Remote Services). Граф-мотив: путь user→host→host→resource длиной ≥3 хоста.',
+    hub: 'U-SUPPORT-1',
+    users: [ usr('U-SUPPORT-1', 'Данияр К. (синт.)', 'support', { avg_rows_per_day: 200, work_hours: [9,18], known_tables: ['DB-TICKETS'] }, ['compromised']) ],
+    resources: [ rsc('DB-PERSONS', 'Реестр физлиц: ФИО / ИИН', 'persons', 'critical', ['pii']) ],
+    hosts: [
+      hst('H-WS-31', 'АРМ поддержки', 'office'),
+      hst('H-JUMP-1', 'Промежуточный хост', 'dmz'),
+      hst('H-APP-7', 'Сервер приложений', 'internal'),
+      hst('H-DB-1', 'Сервер БД физлиц', 'restricted', ['db_server']),
+    ],
+    events: [
+      { id:'E-2001', from:'H-WS-31', to:'H-JUMP-1', user:'U-SUPPORT-1', role:'support', resource:'H-JUMP-1', db:'-', host:'H-JUMP-1', ip:'10.30.1.31', geo:'Астана', action:'LOGIN', rows:0, ts:'2026-06-11 21:02', channel:'rdp' },
+      { id:'E-2002', from:'H-JUMP-1', to:'H-APP-7', user:'U-SUPPORT-1', role:'support', resource:'H-APP-7', db:'-', host:'H-APP-7', ip:'10.30.2.7', geo:'Астана', action:'LOGIN', rows:0, ts:'2026-06-11 21:09', channel:'ssh' },
+      { id:'E-2003', from:'H-APP-7', to:'H-DB-1', user:'U-SUPPORT-1', role:'support', resource:'H-DB-1', db:'-', host:'H-DB-1', ip:'10.30.3.1', geo:'Астана', action:'LOGIN', rows:0, ts:'2026-06-11 21:15', channel:'ssh' },
+      { id:'E-2004', from:'H-DB-1', to:'DB-PERSONS', user:'U-SUPPORT-1', role:'support', resource:'DB-PERSONS', db:'persons', host:'H-DB-1', ip:'10.30.3.1', geo:'Астана', action:'SELECT', rows:1500, ts:'2026-06-11 21:21', channel:'db' },
+    ],
+  },
+
+  // 3. PRIV_ESCALATION — джуниор получает admin-grant вне заявок → читает зарплатную/санкционную таблицу
+  {
+    id: 'INC-7110',
+    typology: 'priv_escalation',
+    title: 'Эскалация привилегий: admin-grant вне заявок → санкционная таблица',
+    channel: 'Журнал управления доступом (IAM / GRANT audit)',
+    facts: 'Джуниор-специалист (роль: junior) получает GRANT прав администратора без зарегистрированной заявки в сервис-деске, после чего читает зарплатную и санкционную таблицы, к которым его роль доступа не имеет. Повышение привилегий вне процесса — классический шаг инсайдера перед эксфильтрацией.',
+    source: 'MITRE ATT&CK TA0004 Privilege Escalation (T1098 Account Manipulation). Контроль: GRANT/SUDO/смена роли без тикета в процессе заявок.',
+    hub: 'U-JUNIOR-5',
+    users: [ usr('U-JUNIOR-5', 'Аружан Т. (синт.)', 'junior', { avg_rows_per_day: 100, work_hours: [9,18], known_tables: ['DB-REF'] }, []) ],
+    resources: [
+      rsc('DB-SALARY', 'Зарплатная ведомость', 'salary', 'high', ['financial']),
+      rsc('DB-SANCTIONS', 'Санкционный перечень', 'sanctions', 'critical', ['financial']),
+    ],
+    hosts: [ hst('H-WS-50', 'АРМ джуниора', 'office') ],
+    events: [
+      { id:'E-3001', from:'U-JUNIOR-5', to:'DB-SALARY', user:'U-JUNIOR-5', role:'junior', resource:'DB-SALARY', db:'salary', host:'H-WS-50', ip:'10.20.6.50', geo:'Астана', action:'GRANT', rows:0, ts:'2026-06-10 15:40', channel:'iam' },
+      { id:'E-3002', from:'U-JUNIOR-5', to:'DB-SALARY', user:'U-JUNIOR-5', role:'junior', resource:'DB-SALARY', db:'salary', host:'H-WS-50', ip:'10.20.6.50', geo:'Астана', action:'SELECT', rows:3200, ts:'2026-06-10 15:45', channel:'db' },
+      { id:'E-3003', from:'U-JUNIOR-5', to:'DB-SANCTIONS', user:'U-JUNIOR-5', role:'junior', resource:'DB-SANCTIONS', db:'sanctions', host:'H-WS-50', ip:'10.20.6.50', geo:'Астана', action:'SELECT', rows:1800, ts:'2026-06-10 15:52', channel:'db' },
+    ],
+  },
+
+  // 4. OFF_HOURS_BURST — доступ в выходной + всплеск SELECT по налоговой базе
+  {
+    id: 'INC-7155',
+    typology: 'off_hours',
+    title: 'Всплеск в выходной: серия SELECT по налоговой базе в воскресенье',
+    channel: 'Журнал доступа БД «Налоговые данные»',
+    facts: 'Специалист обращается к налоговой базе в воскресенье (нерабочий день, вне work_hours), совершает всплеск из 6 операций чтения на ~9 600 строк суммарно при baseline 300/день. Доступ в выходной без зарегистрированного дежурства плюс всплеск активности — поведенческая аномалия относительно собственного профиля.',
+    source: 'UEBA: time-of-day / day-of-week anomaly относительно work_hours пользователя (MITRE ATT&CK T1078 Valid Accounts — abuse в нетипичное время).',
+    hub: 'U-TAX-2',
+    users: [ usr('U-TAX-2', 'Мадина Ж. (синт.)', 'analyst', { avg_rows_per_day: 300, work_hours: [9,18], known_tables: ['DB-TAX'] }, []) ],
+    resources: [ rsc('DB-TAX', 'Налоговые данные физлиц', 'tax', 'high', ['financial']) ],
+    hosts: [ hst('H-WS-22', 'АРМ', 'office') ],
+    events: [
+      ...Array.from({length:6}, (_,i)=> ({ id:`E-${4000+i}`, from:'U-TAX-2', to:'DB-TAX', user:'U-TAX-2', role:'analyst', resource:'DB-TAX', db:'tax', host:'H-WS-22', ip:'10.20.5.22', geo:'Астана', action:'SELECT', rows:1600, ts:`2026-06-14 0${i+1}:1${i}`, channel:'db' })),
+    ],
+  },
+
+  // 5. STAGING_EXFIL — массовое чтение → выгрузка ~1:1 наружу (near-zero оседание)
+  {
+    id: 'INC-7177',
+    typology: 'staging_exfil',
+    title: 'Стейджинг и выгрузка: прочитал 60k → выгрузил 58k наружу (≈1:1)',
+    channel: 'Журнал доступа БД + журнал исходящих выгрузок (DLP egress)',
+    facts: 'Пользователь массово читает 60 000 строк из реестра физлиц, затем почти весь объём (58 000) выгружает наружу через EXPORT/download. Соотношение прочитано≈выгружено (near-zero оседание внутри периметра) — признак стейджинга данных под эксфильтрацию: данные не используются, а перекачиваются.',
+    source: 'MITRE ATT&CK T1074 Data Staged → T1048 Exfiltration. Passthrough-примитив: объём чтения ≈ объёму выгрузки наружу.',
+    hub: 'U-OPS-4',
+    users: [ usr('U-OPS-4', 'Ерлан С. (синт.)', 'analyst', { avg_rows_per_day: 400, work_hours: [9,18], known_tables: ['DB-PERSONS'] }, []) ],
+    resources: [ rsc('DB-PERSONS', 'Реестр физлиц: ФИО / ИИН / телефон', 'persons', 'critical', ['pii']) ],
+    hosts: [ hst('H-WS-44', 'АРМ', 'office') ],
+    events: [
+      { id:'E-5001', from:'U-OPS-4', to:'DB-PERSONS', user:'U-OPS-4', role:'analyst', resource:'DB-PERSONS', db:'persons', host:'H-WS-44', ip:'10.20.7.44', geo:'Астана', action:'SELECT', rows:60000, ts:'2026-06-13 19:40', channel:'db' },
+      { id:'E-5002', from:'U-OPS-4', to:'DB-PERSONS', user:'U-OPS-4', role:'analyst', resource:'DB-PERSONS', db:'persons', host:'H-WS-44', ip:'10.20.7.44', geo:'Астана', action:'EXPORT', rows:58000, ts:'2026-06-13 19:58', channel:'cloud' },
+    ],
+  },
+
+  // 6. COMPROMISE / IMPOSSIBLE_TRAVEL — логин Астана, через 8 мин из-за рубежа, затем аномальный доступ
+  {
+    id: 'INC-7203',
+    typology: 'compromise',
+    title: 'Компрометация: impossible travel (Астана → зарубеж за 8 мин) + доступ к ПДн',
+    channel: 'Журнал аутентификации (гео/устройство) + доступ к БД',
+    facts: 'Аккаунт логинится из Астаны (10:02), через 8 минут — успешный логин с зарубежного IP и нового устройства (физически невозможное перемещение), затем сразу массовый доступ к базе физлиц. Связка нового гео + нового устройства + impossible-travel + немедленного аномального доступа указывает на компрометацию учётных данных (фишинг-вектор).',
+    source: 'MITRE ATT&CK T1078 Valid Accounts + impossible travel detection (Microsoft / Okta UEBA). Индикатор компрометации: новый гео + новое устройство + аномалия в одном окне.',
+    hub: 'U-CLERK-9',
+    users: [ usr('U-CLERK-9', 'Айгерим Б. (синт.)', 'clerk', { avg_rows_per_day: 150, work_hours: [9,18], known_tables: ['DB-PERSONS'], home_geo:'Астана' }, []) ],
+    resources: [ rsc('DB-PERSONS', 'Реестр физлиц: ФИО / ИИН / адрес', 'persons', 'critical', ['pii']) ],
+    hosts: [
+      hst('H-WS-09', 'АРМ (Астана)', 'office'),
+      hst('H-DEV-X', 'Неизвестное устройство (зарубеж)', 'external', ['new_device']),
+    ],
+    events: [
+      { id:'E-6001', from:'U-CLERK-9', to:'H-WS-09', user:'U-CLERK-9', role:'clerk', resource:'H-WS-09', db:'-', host:'H-WS-09', ip:'10.20.1.9', geo:'Астана', action:'LOGIN', rows:0, ts:'2026-06-12 10:02', channel:'web' },
+      { id:'E-6002', from:'U-CLERK-9', to:'H-DEV-X', user:'U-CLERK-9', role:'clerk', resource:'H-DEV-X', db:'-', host:'H-DEV-X', ip:'185.62.44.7', geo:'Зарубеж (Амстердам)', action:'LOGIN', rows:0, ts:'2026-06-12 10:10', channel:'web' },
+      { id:'E-6003', from:'U-CLERK-9', to:'DB-PERSONS', user:'U-CLERK-9', role:'clerk', resource:'DB-PERSONS', db:'persons', host:'H-DEV-X', ip:'185.62.44.7', geo:'Зарубеж (Амстердам)', action:'SELECT', rows:15000, ts:'2026-06-12 10:13', channel:'db' },
+    ],
+  },
+
+  // 7. BROAD_ACCESS — поддержка трогает 12 БД, к которым раньше не обращалась
+  {
+    id: 'INC-7240',
+    typology: 'broad_access',
+    title: 'Аномально широкий доступ: 12 новых БД вне профиля за час',
+    channel: 'Журнал доступа БД (cross-resource audit)',
+    facts: 'Сотрудник поддержки за час обращается к 12 разным базам данных, ни к одной из которых ранее не обращался (все вне known_tables). Веерный сбор по множеству ресурсов (scatter-gather по доступу) — почерк разведки данных перед массовой эксфильтрацией или скомпрометированного аккаунта, прощупывающего, где лежат ценные ПДн.',
+    source: 'MITRE ATT&CK T1213 Data from Information Repositories / discovery. UEBA: резкое расширение набора ресурсов относительно known_tables пользователя.',
+    hub: 'U-HELP-7',
+    users: [ usr('U-HELP-7', 'Тимур Н. (синт.)', 'support', { avg_rows_per_day: 250, work_hours: [9,18], known_tables: ['DB-TICKETS'] }, []) ],
+    resources: Array.from({length:12}, (_,i)=> rsc(`DB-X${i+1}`, `База #${i+1} (ПДн/финданные)`, `db${i+1}`, i<4?'critical':'high', ['pii'])),
+    hosts: [ hst('H-WS-77', 'АРМ поддержки', 'office') ],
+    events: Array.from({length:12}, (_,i)=> ({ id:`E-${7000+i}`, from:'U-HELP-7', to:`DB-X${i+1}`, user:'U-HELP-7', role:'support', resource:`DB-X${i+1}`, db:`db${i+1}`, host:'H-WS-77', ip:'10.20.8.77', geo:'Астана', action:'SELECT', rows:400 + i*30, ts:`2026-06-13 1${i<6?'1':'2'}:${10+i*3}`, channel:'db' })),
+  },
+
+  // 8. ETL / BACKUP сервис-аккаунт — большой ночной объём, established baseline → ПОДАВЛЕН (контроль)
+  {
+    id: 'INC-9001',
+    typology: 'etl_service',
+    title: 'ETL/бэкап сервис-аккаунт: плановый ночной объём (легитимно)',
+    channel: 'Журнал доступа БД (сервисный аккаунт)',
+    facts: 'Сервисный аккаунт ночного ETL/бэкапа читает большой объём (90 000 строк) в 03:00 — но это его устоявшийся регулярный паттерн: baseline сам ночной и крупнообъёмный (avg 85 000/ночь), доступ строго по своим known_tables, без GRANT, без бокового движения, без выгрузки наружу. Контрольный negative: наивный объёмный порог пометит, контекст baseline снимает тревогу.',
+    source: 'Контрольный negative (precision). established сервис-аккаунт со стабильным крупнообъёмным ночным baseline. На синтетике детекторы «overly optimistic» — держим консервативный mitigation для established без жёстких крит-кодов.',
+    hub: 'SVC-ETL-1',
+    users: [ usr('SVC-ETL-1', 'svc_etl_backup (сервис-аккаунт)', 'service', { avg_rows_per_day: 85000, work_hours: [0,6], known_tables: ['DB-PERSONS','DB-TAX'], night_job:true }, ['established','service_account']) ],
+    resources: [ rsc('DB-PERSONS', 'Реестр физлиц (бэкап-снимок)', 'persons', 'critical', ['pii']) ],
+    hosts: [ hst('H-BACKUP-1', 'Сервер бэкапов', 'internal', ['backup']) ],
+    events: [
+      { id:'E-8001', from:'SVC-ETL-1', to:'DB-PERSONS', user:'SVC-ETL-1', role:'service', resource:'DB-PERSONS', db:'persons', host:'H-BACKUP-1', ip:'10.40.0.1', geo:'Астана', action:'SELECT', rows:90000, ts:'2026-06-13 03:00', channel:'db' },
+    ],
+  },
+
+  // 9. PLANNED_AUDIT — аналитик в плановой проверке, повышенный объём в рабочее время по своим таблицам → ПОДАВЛЕН (контроль)
+  {
+    id: 'INC-9002',
+    typology: 'planned_audit',
+    title: 'Плановая проверка: повышенный объём в рабочее время по своим таблицам (легитимно)',
+    channel: 'Журнал доступа БД (аналитик)',
+    facts: 'Аналитик в рамках плановой проверки читает повышенный объём (4 500 строк, ×~3 от baseline 1500/день) в рабочее время по своим обычным таблицам. Объём выше нормы, но в work_hours, по known_tables, без GRANT/бокового движения/выгрузки. Пограничный negative: наивный «×3 объёма» пометит — контекст (рабочее время + свои таблицы + established) подавляет тревогу.',
+    source: 'Пограничный negative (precision): отклонение объёма без сопутствующих крит-индикаторов и при established-аккаунте не должно эскалироваться. Снижает ложные тревоги по легитимной плановой работе.',
+    hub: 'U-AUDIT-1',
+    users: [ usr('U-AUDIT-1', 'Нурлан Е. (аудитор, синт.)', 'auditor', { avg_rows_per_day: 1500, work_hours: [9,18], known_tables: ['DB-TAX','DB-SALARY'] }, ['established']) ],
+    resources: [
+      rsc('DB-TAX', 'Налоговые данные', 'tax', 'high', ['financial']),
+      rsc('DB-SALARY', 'Зарплатная ведомость', 'salary', 'high', ['financial']),
+    ],
+    hosts: [ hst('H-WS-01', 'АРМ аудитора', 'office') ],
+    events: [
+      { id:'E-9001', from:'U-AUDIT-1', to:'DB-TAX', user:'U-AUDIT-1', role:'auditor', resource:'DB-TAX', db:'tax', host:'H-WS-01', ip:'10.20.2.1', geo:'Астана', action:'SELECT', rows:2500, ts:'2026-06-12 11:20', channel:'db' },
+      { id:'E-9002', from:'U-AUDIT-1', to:'DB-SALARY', user:'U-AUDIT-1', role:'auditor', resource:'DB-SALARY', db:'salary', host:'H-WS-01', ip:'10.20.2.1', geo:'Астана', action:'SELECT', rows:2000, ts:'2026-06-12 14:05', channel:'db' },
+    ],
+  },
+];
+
+// Ground-truth: какие инциденты реально нелегитимны (для честных метрик precision/recall).
+const BENIGN_TYPOLOGIES = new Set(['etl_service', 'planned_audit']);
+const isIllicit = (cs) => !BENIGN_TYPOLOGIES.has(cs.typology);
+
+// Кросс-связь инцидентов через общий скомпрометированный маркер: аккаунты/хосты с tag
+// 'compromised' или 'new_device' помечены как ранее фигурировавшие в другом инциденте —
+// мост между делами по общему скомпрометированному аккаунту/устройству/IP.
+const CROSS_TAGS = ['compromised', 'new_device'];
+function relatedCases(cs) {
+  const hasCross = (o) =>
+    o.users.some(u => (u.tags||[]).some(t => CROSS_TAGS.includes(t))) ||
+    o.hosts.some(h => (h.tags||[]).some(t => CROSS_TAGS.includes(t)));
+  if (!hasCross(cs)) return [];
+  return CASES
+    .filter(o => o.id !== cs.id && hasCross(o))
+    .map(o => ({ id: o.id, title: o.title }));
+}
+
+/* ---------------------------------------------------------------------
+   ДЕТЕРМИНИРОВАННЫЙ ДВИЖОК ДЕТЕКТА (mock-AI · UEBA)
+   1) Графовые эвристики на adjacency (networkx-эквивалент в JS): доступ user→resource/host
+   2) Поведенческие триггеры ОТНОСИТЕЛЬНО baseline пользователя (объём / время / широта / привилегии)
+   3) Risk score 0-100 (взвешенная сумма триггеров) + приоритет
+   4) SHAP-like вклад каждого фактора (additive contributions)
+   --------------------------------------------------------------------- */
+
+const VOLUME_MULT = 80;          // кратность baseline для VOLUME_ANOMALY (×80 — слепок 16M-утечки)
+const ABS_VOLUME_FLOOR = 50000;  // абсолютный пол массовой выгрузки при норме <500/день
+
+// Собираем все узлы инцидента в единую map (как buildGraph в AML-версии: agg по рёбрам).
+function allNodes(cs) {
+  const map = {};
+  cs.users.forEach(u => map[u.id] = u);
+  cs.resources.forEach(r => map[r.id] = r);
+  cs.hosts.forEach(h => map[h.id] = h);
+  return map;
+}
+
+// buildGraph — переиспользован из AML-каркаса: агрегируем по рёбрам (amount→rows).
+// Возвращает узлы с inRows/outRows/inDeg/outDeg (как было inAmt/outAmt/inDeg/outDeg).
+function buildGraph(cs) {
+  const meta = allNodes(cs);
+  const nodes = {};
+  Object.values(meta).forEach(a => { nodes[a.id] = { ...a, inRows:0, outRows:0, inDeg:0, outDeg:0 }; });
+  cs.events.forEach(t => {
+    if (!nodes[t.from]) nodes[t.from] = { id:t.from, kind:'?', label:t.from, tags:[], inRows:0, outRows:0, inDeg:0, outDeg:0 };
+    if (!nodes[t.to])   nodes[t.to]   = { id:t.to, kind:'?', label:t.to, tags:[], inRows:0, outRows:0, inDeg:0, outDeg:0 };
+    nodes[t.from].outRows += t.rows; nodes[t.from].outDeg++;
+    nodes[t.to].inRows   += t.rows;  nodes[t.to].inDeg++;
+  });
+  return nodes;
+}
+
+// поиск пути-цепочки user→host→host→...→resource (DFS, до длины 6) — боковое перемещение.
+// Переиспользует AML hasCycle()-механику DFS, но ищет ПУТЬ через ≥3 хоста (а не цикл A→A).
+function hasCycle(cs) {
+  const adj = {};
+  cs.events.forEach(t => { (adj[t.from] = adj[t.from] || []).push(t.to); });
+  const meta = allNodes(cs);
+  const isHost = (id) => meta[id] && meta[id].kind === 'host';
+  const isResource = (id) => meta[id] && meta[id].kind === 'resource';
+  const start = Object.keys(adj);
+  for (const s of start) {
+    const stack = [[s, [s]]];
+    while (stack.length) {
+      const [n, path] = stack.pop();
+      for (const m of (adj[n] || [])) {
+        const hostsInPath = path.filter(isHost).length;
+        // путь, проходящий через ≥3 хоста и упирающийся в ресурс = боковое перемещение к данным
+        if (isResource(m) && hostsInPath >= 3) return path.concat(m);
+        if (!path.includes(m) && path.length < 6) stack.push([m, path.concat(m)]);
+      }
+    }
+  }
+  return null;
+}
+
+function fmt(n) { return new Intl.NumberFormat('ru-RU').format(Math.round(n)); }
+
+// час из ts "YYYY-MM-DD HH:MM"
+function hourOf(ts) { return parseInt(ts.slice(11,13), 10); }
+// день недели (0=вс..6=сб) из ts
+function dowOf(ts) { return new Date(ts.slice(0,10) + 'T00:00:00').getDay(); }
+
+// Главная функция скоринга. Возвращает {score, priority, triggers[], shap[], graphStats, nodes, mitigation}
+function analyze(cs) {
+  const nodes = buildGraph(cs);
+  const nodeArr = Object.values(nodes);
+  const triggers = []; // {code, label, weight, detail, severity}
+
+  const add = (code, label, weight, detail, severity='warn') =>
+    triggers.push({ code, label, weight, detail, severity });
+
+  // baseline владельца инцидента (пользователь-хаб)
+  const owner = cs.users.find(u => u.id === cs.hub) || cs.users[0];
+  const bl = (owner && owner.baseline) || { avg_rows_per_day: 500, work_hours: [9,18], known_tables: [] };
+  const userEvents = cs.events.filter(e => e.user === (owner && owner.id));
+
+  // суммарный объём чтения/выгрузки пользователя за окно инцидента
+  const readRows = userEvents
+    .filter(e => ['SELECT','EXPORT','DOWNLOAD'].includes(e.action))
+    .reduce((s,e)=> s + e.rows, 0);
+  const exportEvents = userEvents.filter(e => ['EXPORT','DOWNLOAD'].includes(e.action));
+  const exportRows = exportEvents.reduce((s,e)=> s + e.rows, 0);
+  const selectRows = userEvents.filter(e => e.action === 'SELECT').reduce((s,e)=> s + e.rows, 0);
+
+  // --- ПОВЕДЕНЧЕСКОЕ: VOLUME_ANOMALY (массовая выгрузка относительно baseline) ---
+  // мьютекс-флаг: на каком пользователе сработала объёмная аномалия (чтобы BROAD_ACCESS,
+  // считающий «много ресурсов», не дублировал объёмный сигнал на том же узле — взаимоисключение).
+  let volumeHub = null;
+  const overMult = readRows > VOLUME_MULT * Math.max(1, bl.avg_rows_per_day);
+  const overFloor = readRows >= ABS_VOLUME_FLOOR && bl.avg_rows_per_day < 500;
+  if (overMult || overFloor) {
+    volumeHub = owner.id;
+    const mult = (readRows / Math.max(1, bl.avg_rows_per_day)).toFixed(0);
+    add('VOLUME_ANOMALY', 'Аномальный объём выгрузки', 28,
+      `Пользователь ${owner.id} обратился к ${fmt(readRows)} строкам при персональном baseline ${fmt(bl.avg_rows_per_day)}/день (×${mult}). Объём несовместим с должностными обязанностями — слепок массовой эксфильтрации.`, 'bad');
+  } else if (readRows >= ABS_VOLUME_FLOOR) {
+    // МЯГКИЙ объёмный сигнал: крупный абсолютный объём, который НЕ является аномалией относительно
+    // персонального baseline (например established / сервисный ETL-бэкап с легитимно крупным ночным
+    // профилем). Грубый периметровый DLP пометил бы такой объём; UEBA — лишь мягко, давая контексту
+    // (established/service_account, см. mitigation ниже) подавить тревогу. Взаимоисключение с
+    // жёстким VOLUME_ANOMALY (тот же объём не считается дважды).
+    volumeHub = owner.id;
+    const nightCtx = userEvents.some(e => { const h = hourOf(e.ts); return h < 6 || h >= 22; });
+    add('VOLUME_SOFT', 'Крупный объём доступа', 16,
+      `Пользователь ${owner.id} обратился к ${fmt(readRows)} строкам${nightCtx ? ' в ночном окне' : ''} — крупный абсолютный объём, но в пределах персонального baseline ${fmt(bl.avg_rows_per_day)}/день (без кратного превышения). Сигнал требует контекстной проверки, а не автоматической эскалации.`, 'warn');
+  }
+
+  // --- ГРАФ: LATERAL_MOVEMENT (боковое перемещение через ≥3 хоста до ресурса) ---
+  const path = hasCycle(cs);
+  if (path) {
+    add('LATERAL_MOVEMENT', 'Боковое перемещение', 30,
+      `Обнаружена цепочка доступа: ${path.join(' → ')}. Аккаунт прыгает по ${path.filter(id => (nodes[id]||{}).kind==='host').length} хостам до базы данных — обход сегментации сети, почерк скомпрометированного аккаунта.`, 'crit');
+  }
+
+  // --- ГРАФ: BROAD_ACCESS (аномально широкий доступ к новым ресурсам, scatter-gather) ---
+  // считаем уникальные ресурсы вне known_tables, к которым обращался пользователь.
+  const knownDbs = new Set((bl.known_tables || []));
+  const touchedResources = new Set(
+    userEvents.filter(e => (nodes[e.resource]||{}).kind === 'resource').map(e => e.resource)
+  );
+  const newResources = [...touchedResources].filter(rid => !knownDbs.has(rid));
+  // BROAD_ACCESS добавляем ТОЛЬКО если на этом же пользователе НЕ сработала объёмная аномалия
+  // (volumeHub) — иначе один и тот же всплеск активности считается дважды. Взаимоисключение
+  // (аналог FAN_IN ⊥ STRUCTURING в AML-каркасе).
+  let broadHub = null; // на каком узле сработал «широкий/выходящий за профиль» доступ
+  if (newResources.length >= 5 && owner.id !== volumeHub) {
+    broadHub = owner.id;
+    add('BROAD_ACCESS', 'Аномально широкий доступ', 32,
+      `Пользователь ${owner.id} обратился к ${newResources.length} ресурсам вне своего профиля (known_tables: ${[...knownDbs].join(', ')||'—'}). Веерный сбор по множеству БД (scatter-gather) — разведка данных перед эксфильтрацией.`, 'crit');
+  } else if (newResources.length >= 1 && newResources.length < 5 && owner.id !== volumeHub) {
+    // Доступ к 1-4 ресурсам вне профиля (sub-BROAD_ACCESS): слабее веерного сбора, но всё ещё
+    // выход за known_tables. Взаимоисключение с BROAD_ACCESS и VOLUME_ANOMALY на том же узле —
+    // тот же выход-за-профиль не считается дважды.
+    broadHub = owner.id;
+    const sens = newResources.map(rid => (nodes[rid]||{}).sensitivity).filter(s=>s==='critical' || s==='high');
+    add('SENSITIVE_ACCESS', 'Доступ к ресурсу вне профиля роли', 12,
+      `Пользователь ${owner.id} обратился к ${newResources.length} ресурс(у/ам) вне своего профиля (known_tables: ${[...knownDbs].join(', ')||'—'})${sens.length?`, из них ${sens.length} высокой/критической чувствительности`:''}. Чтение данных, не положенных роли.`, 'bad');
+  }
+
+  // --- ПОВЕДЕНЧЕСКОЕ: BULK_EXFIL (молниеносная выгрузка наружу после массового чтения) ---
+  if (exportEvents.length >= 2 || (exportEvents.length >= 1 && selectRows >= ABS_VOLUME_FLOOR)) {
+    add('BULK_EXFIL', 'Молниеносная выгрузка наружу', 24,
+      `${exportEvents.length} операц(ия/ий) EXPORT/download (${fmt(exportRows)} строк) сразу после массового чтения. Данные покидают периметр — активная эксфильтрация.`, 'crit');
+  }
+
+  // --- ПОВЕДЕНЧЕСКОЕ: OFF_HOURS_VELOCITY (операции вне work_hours / выходные + всплеск) ---
+  const [wStart, wEnd] = bl.work_hours || [9,18];
+  // сервисный ночной job (night_job) не штрафуем за ночь — это его норма
+  const offHoursEvents = userEvents.filter(e => {
+    if (bl.night_job) return false;
+    const h = hourOf(e.ts), d = dowOf(e.ts);
+    const weekend = (d === 0 || d === 6);
+    const outsideHours = h < wStart || h >= wEnd;
+    return weekend || outsideHours;
+  });
+  const burst = userEvents.length >= 3 || readRows > 3 * Math.max(1, bl.avg_rows_per_day);
+  if (offHoursEvents.length >= 1 && burst) {
+    add('OFF_HOURS_VELOCITY', 'Активность вне рабочих часов + всплеск', 20,
+      `${offHoursEvents.length} операц(ия/ий) вне work_hours ${wStart}:00–${wEnd}:00 / в выходной, на фоне всплеска активности. Поведение вне персонального профиля времени.`, 'bad');
+  }
+
+  // --- ПОВЕДЕНЧЕСКОЕ: PRIV_ESCALATION (GRANT/SUDO/смена роли вне процесса заявок) ---
+  const escEvents = userEvents.filter(e => ['GRANT','SUDO','ROLE_CHANGE'].includes(e.action));
+  if (escEvents.length >= 1) {
+    add('PRIV_ESCALATION', 'Эскалация привилегий вне заявок', 26,
+      `${escEvents.length} операц(ия/ий) ${[...new Set(escEvents.map(e=>e.action))].join('/')} без зарегистрированной заявки. Повышение прав вне процесса — шаг подготовки к несанкционированному доступу.`, 'crit');
+  }
+
+  // --- ПОВЕДЕНЧЕСКОЕ: COMPROMISE_INDICATORS (новый гео/устройство + impossible travel) ---
+  const homeGeo = bl.home_geo || 'Астана';
+  const foreignLogins = userEvents.filter(e => e.action === 'LOGIN' && e.geo && e.geo !== homeGeo && !e.geo.startsWith(homeGeo));
+  const newDevice = userEvents.some(e => (nodes[e.host]||{}).tags?.includes('new_device'));
+  // impossible travel: два логина из разных гео в окне ≤ 60 мин
+  let impossible = false;
+  const logins = userEvents.filter(e => e.action === 'LOGIN').sort((a,b)=> a.ts.localeCompare(b.ts));
+  for (let i=1;i<logins.length;i++) {
+    if (logins[i].geo !== logins[i-1].geo) {
+      const dt = (new Date(logins[i].ts.replace(' ','T')) - new Date(logins[i-1].ts.replace(' ','T'))) / 60000;
+      if (dt >= 0 && dt <= 60) impossible = true;
+    }
+  }
+  if ((foreignLogins.length >= 1 && (newDevice || impossible))) {
+    add('COMPROMISE_INDICATORS', 'Индикаторы компрометации (новый гео/устройство)', 22,
+      `Логин из нового гео (${[...new Set(foreignLogins.map(e=>e.geo))].join(', ')})${newDevice?' с нового устройства':''}${impossible?', impossible travel (<60 мин между гео)':''}, затем аномальный доступ. Учётные данные вероятно скомпрометированы (фишинг-вектор).`, 'bad');
+  }
+
+  // --- ПОВЕДЕНЧЕСКОЕ: STAGING_EXFIL (прочитал ≈ выгрузил наружу, near-zero оседание) ---
+  // passthrough-примитив: объём чтения ≈ объёму выгрузки (как passthrough в AML, но rows).
+  if (selectRows > 0 && exportRows > 0 && Math.abs(selectRows - exportRows) / selectRows < 0.12) {
+    add('STAGING_EXFIL', 'Стейджинг под эксфильтрацию (≈1:1 чтение→выгрузка)', 18,
+      `Прочитано ${fmt(selectRows)} ≈ выгружено ${fmt(exportRows)} строк (оседание ≈0). Данные не используются, а перекачиваются наружу — стейджинг под эксфильтрацию.`, 'bad');
+  }
+
+  // --- ПОВЕДЕНЧЕСКОЕ: COVERT_CHANNEL (выгрузка в облако/мессенджер/личную почту) ---
+  const covertEvents = userEvents.filter(e => ['cloud','messenger','personal_email'].includes(e.channel) && ['EXPORT','DOWNLOAD'].includes(e.action));
+  if (covertEvents.length >= 1) {
+    const channelFlagged = cs.hosts.some(h => (h.tags||[]).includes('flagged_channel')) ||
+      cs.users.some(u => (u.tags||[]).includes('flagged_channel'));
+    const w = channelFlagged ? 24 : 12;
+    add('COVERT_CHANNEL', 'Выгрузка по скрытому каналу', w,
+      `${covertEvents.length} выгрузк(а/и) через ${[...new Set(covertEvents.map(e=>e.channel))].join('/')} (облако/мессенджер/личная почта)${channelFlagged?'. Канал РАНЕЕ помечен в другом инциденте (×2).':'.'} Обход корпоративных каналов передачи данных.`, channelFlagged ? 'bad' : 'warn');
+  }
+
+  // --- если ничего не сработало — легитимная активность ---
+  if (triggers.length === 0) {
+    add('CLEAN', 'Аномалий не выявлено', 0,
+      'Активность соответствует персональному baseline (объём, время, набор ресурсов в норме). Несанкционированного доступа не выявлено — ложная тревога не сформирована.', 'good');
+  }
+
+  // --- SCORE: сумма весов → 0-100 с насыщением + контекст-снижение для established-аккаунтов ---
+  const sumW = triggers.reduce((s,t)=> s + t.weight, 0);
+  // established = аккаунт с устоявшимся стабильным baseline (сервисные ETL/бэкап, давно работающий
+  // аналитик). Снижаем риск ТОЛЬКО если нет жёстких крит-кодов (боковое движение / выгрузка наружу /
+  // эскалация привилегий) — иначе established не должен спасать от реальной угрозы.
+  const established = cs.users.some(u => (u.tags || []).includes('established') || (u.tags || []).includes('service_account'));
+  const hardCrit = triggers.some(t => ['LATERAL_MOVEMENT','BULK_EXFIL','PRIV_ESCALATION'].includes(t.code));
+  let mitigation = null, effRaw = sumW;
+  if (established && !hardCrit && sumW > 0) {
+    effRaw = sumW * 0.45;
+    mitigation = { factor: 0.45, note: 'Аккаунт с устоявшимся стабильным baseline (established / сервисный ETL-бэкап) и без жёстких крит-индикаторов (боковое движение / выгрузка наружу / эскалация привилегий) → контекст снижает риск, чтобы не штрафовать легитимную регулярную работу.' };
+  }
+  // ВАЖНО: никакого clamp по ground-truth label (никакой "if benign → score↓") —
+  // это была бы утечка целевой переменной. Score определяется ТОЛЬКО триггерами движка.
+  let score = Math.round(100 * (1 - Math.exp(-effRaw / 38)));
+  score = Math.max(0, Math.min(100, score));
+
+  // --- SHAP-like: вклад каждого триггера в финальный score (additive). ---
+  // Largest-remainder (Hamilton): целочисленные доли, сумма которых ТОЧНО === score
+  // (обычный Math.round по каждому даёт sum≠score из-за ошибок округления).
+  const shapBase = triggers.filter(t => t.weight > 0);
+  let shap = [];
+  if (shapBase.length && sumW) {
+    const quotas = shapBase.map(t => ({ t, exact: (t.weight / sumW) * score }));
+    quotas.forEach(q => { q.floor = Math.floor(q.exact); q.rem = q.exact - q.floor; });
+    let assigned = quotas.reduce((s, q) => s + q.floor, 0);
+    let leftover = score - assigned; // сколько целых очков ещё раздать
+    // раздаём остаток по убыванию дробной части (largest remainder)
+    [...quotas].sort((a, b) => b.rem - a.rem).forEach(q => {
+      if (leftover > 0) { q.floor += 1; leftover -= 1; }
+    });
+    shap = quotas
+      .map(q => ({ ...q.t, contribution: q.floor }))
+      .sort((a, b) => b.contribution - a.contribution);
+  }
+
+  // приоритет
+  let priority;
+  if (score >= 80) priority = { lvl:'P1 — Критический', color:'crit', note:'Немедленное реагирование SOC / отзыв сессии' };
+  else if (score >= 55) priority = { lvl:'P2 — Высокий', color:'bad', note:'В очередь на расследование в течение суток' };
+  else if (score >= 30) priority = { lvl:'P3 — Средний', color:'warn', note:'Плановая проверка / накопление сигналов' };
+  else priority = { lvl:'P4 — Низкий', color:'good', note:'Мониторинг без действий' };
+
+  const graphStats = {
+    nodes: nodeArr.length,
+    edges: cs.events.length,
+    totalRows: cs.events.reduce((s,t)=> s+t.rows, 0),
+    hubId: cs.hub,
+    cycle: path, // путь бокового перемещения (переиспользуем поле для GraphView)
+  };
+
+  return { score, priority, triggers, shap, graphStats, nodes, mitigation };
+}
+
+// рекомендация реагирования (IR-плейбук) по типологии инцидента
+const RESPONSE = {
+  mass_exfil: ['Немедленно отозвать активную сессию и токены пользователя, заблокировать аккаунт.', 'Запросить у владельца ресурса (БД физлиц) подтверждение легитимности выборки 80k записей.', 'Зафиксировать объём выгруженных ПДн, инициировать оценку ущерба; эскалация в CISO/КНБ.'],
+  lateral: ['Отозвать сессию и изолировать все 4 хоста из цепочки от сети.', 'Форс-ресет пароля + перевыпуск MFA для скомпрометированного аккаунта.', 'Поднять журналы аутентификации хостов, проверить горизонт компрометации; эскалация в CISO.'],
+  priv_escalation: ['Немедленно отозвать выданный admin-grant, вернуть роль к исходной.', 'Заблокировать аккаунт, запросить у владельца IAM-процесса подтверждение наличия заявки (её нет).', 'Проверить, что было прочитано после эскалации (зарплата/санкции); эскалация в CISO.'],
+  off_hours: ['Запросить у руководителя подтверждение санкционированного дежурства в выходной.', 'Временно ограничить доступ к налоговой базе вне work_hours.', 'Накопить сигнал; при повторе — поднять приоритет и заблокировать сессию.'],
+  staging_exfil: ['Срочно заблокировать исходящий канал (cloud egress) и отозвать сессию.', 'Изолировать рабочую станцию, снять образ для форензики.', 'Оценить объём ушедших наружу ПДн; уведомление об инциденте, эскалация в CISO/КНБ.'],
+  compromise: ['Немедленно завершить все сессии аккаунта, заблокировать, форс-ресет пароля + MFA.', 'Заблокировать зарубежный IP/устройство; проверить, что было сделано в скомпрометированной сессии.', 'Уведомить пользователя о фишинге; эскалация в CISO, проверка смежных аккаунтов.'],
+  broad_access: ['Отозвать сессию, временно сузить доступ аккаунта до его роли (least privilege).', 'Запросить у владельцев 12 БД подтверждение служебной необходимости (её, вероятно, нет).', 'Проверить, не предшествует ли это эксфильтрации; накопить и эскалировать при повторе.'],
+  etl_service: ['Действий не требуется — паттерн соответствует established baseline сервис-аккаунта.', 'Сохранить как negative-пример для калибровки модели; убедиться, что ротация ключей сервис-аккаунта в норме.'],
+  planned_audit: ['Действий не требуется — повышенный объём в рамках санкционированной плановой проверки.', 'Сохранить как negative-пример для калибровки; снять из очереди алертов.'],
+};
+
+/* ---------------------------------------------------------------------
+   ГЕНЕРАЦИЯ ЧЕРНОВИКА ИНЦИДЕНТ-ОТЧЁТА (IR report)
+   Mock: детерминированный шаблон из триггеров.
+   Опционально: реальный вызов Claude если введён ключ.
+   --------------------------------------------------------------------- */
+function mockSAR(cs, res) {
+  const trg = res.triggers.filter(t=>t.weight>0).map(t=>`• ${t.label}: ${t.detail}`).join('\n');
+  const recs = (RESPONSE[cs.typology]||[]).map((r,i)=>`${i+1}. ${r}`).join('\n');
+  const timeline = cs.events.map(e=> `   ${e.ts} · ${e.user} · ${e.action} · ${e.resource} · ${e.rows?fmt(e.rows)+' строк':'—'} · ${e.geo} (${e.ip})`).join('\n');
+  return `ЧЕРНОВИК ИНЦИДЕНТ-ОТЧЁТА (Incident Response) — ${cs.id}
+Дата формирования: 2026-06-14 | Сформировано автоматически SOC-движком, требует проверки аналитиком.
+
+1. РЕЗЮМЕ ИНЦИДЕНТА. По учётной записи «${cs.hub}» (источник сигнала: ${cs.channel}) выявлены признаки несанкционированной/аномальной активности привилегированного пользователя. Присвоен risk-score ${res.score}/100, приоритет ${res.priority.lvl}. Тип инцидента: ${cs.title}.
+
+2. ХРОНОЛОГИЯ СОБЫТИЙ:
+${timeline}
+
+3. ЗАТРОНУТЫЕ РЕСУРСЫ И ОБЪЁМ ДАННЫХ. В графе доступа ${res.graphStats.nodes} узлов (пользователи/ресурсы/хосты), ${res.graphStats.edges} событий, совокупный объём доступа ${fmt(res.graphStats.totalRows)} строк. Ключевой узел: ${res.graphStats.hubId}.${res.graphStats.cycle ? ' Обнаружена цепочка бокового перемещения.' : ''}
+
+4. ИНДИКАТОРЫ (триггеры детект-движка UEBA):
+${trg}
+
+5. ОБСТОЯТЕЛЬСТВА. ${cs.facts}
+
+6. РЕКОМЕНДАЦИИ ПО РЕАГИРОВАНИЮ / СДЕРЖИВАНИЮ:
+${recs}
+
+Примечание: документ — машинный черновик для ускорения работы SOC/инцидент-аналитика. Не является процессуальным решением. Все данные в прототипе синтетические (ИИН/ФИО/IP вымышлены).`;
+}
+
+async function claudeSAR(cs, res, apiKey) {
+  const sys = `Ты — SOC / инцидент-аналитик (информационная безопасность гос-органа РК). Составь сжатый, формальный черновик ИНЦИДЕНТ-ОТЧЁТА (Incident Response) на русском языке по данным детект-движка UEBA. Структура: резюме инцидента, хронология событий, затронутые ресурсы и объём данных, индикаторы компрометации, рекомендации по реагированию/сдерживанию. Без воды, технически-точный тон, не выдумывай фактов сверх данных. Это синтетические данные для прототипа.`;
+  const user = `Инцидент ${cs.id}. Тип: ${cs.title}. Источник сигнала: ${cs.channel}.
+Обстоятельства: ${cs.facts}
+Risk-score: ${res.score}/100, приоритет ${res.priority.lvl}.
+Хронология:\n${cs.events.map(e=>`- ${e.ts} ${e.user} ${e.action} ${e.resource} ${e.rows?fmt(e.rows)+' строк':''} ${e.geo} ${e.ip}`).join('\n')}
+Индикаторы (триггеры):\n${res.triggers.filter(t=>t.weight>0).map(t=>`- ${t.label}: ${t.detail}`).join('\n')}
+Граф доступа: ${res.graphStats.nodes} узлов, ${res.graphStats.edges} событий, объём ${fmt(res.graphStats.totalRows)} строк.`;
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1100,
+      system: sys,
+      messages: [{ role:'user', content: user }],
+    }),
+  });
+  if (!r.ok) throw new Error('API ' + r.status + ': ' + (await r.text()).slice(0,200));
+  const j = await r.json();
+  return j.content?.map(c=>c.text).join('') || '(пустой ответ)';
+}
+
+/* ---------------------------------------------------------------------
+   ГРАФ-ВИЗУАЛИЗАЦИЯ (SVG, без внешних либ) — layout по ролям узлов
+   Узлы: пользователь / ресурс (БД) / хост. Красные рёбра = путь бокового перемещения.
+   --------------------------------------------------------------------- */
+function GraphView({ cs, res }) {
+  const W = 560, H = 360;
+  const nodes = res.nodes;
+  const ids = Object.keys(nodes);
+  // layout: хаб (пользователь-источник) в центре; источники слева, ресурсы/хосты справа;
+  // цепочка бокового перемещения — по кругу.
+  const hub = cs.hub;
+  const positions = {};
+  if (res.graphStats.cycle) {
+    // круг — для цепочки бокового перемещения
+    const cyNodes = ids;
+    cyNodes.forEach((id, i) => {
+      const ang = (i / cyNodes.length) * Math.PI * 2 - Math.PI/2;
+      positions[id] = { x: W/2 + Math.cos(ang)*150, y: H/2 + Math.sin(ang)*120 };
+    });
+  } else {
+    const sources = ids.filter(id => nodes[id].outDeg > 0 && nodes[id].inDeg === 0);
+    const sinks   = ids.filter(id => nodes[id].inDeg > 0 && nodes[id].outDeg === 0 && id !== hub);
+    const mids    = ids.filter(id => id !== hub && !sources.includes(id) && !sinks.includes(id));
+    positions[hub] = { x: W/2, y: H/2 };
+    // place: одна колонка при ≤6 узлах; при большем — две колонки (читаемо на проекторе)
+    const place = (arr, xBase, dir) => {
+      const cols = arr.length > 6 ? 2 : 1;
+      const perCol = Math.ceil(arr.length / cols);
+      arr.forEach((id, i) => {
+        const col = Math.floor(i / perCol);
+        const row = i % perCol;
+        const n = Math.min(perCol, arr.length);
+        const gap = (H - 60) / Math.max(1, n);
+        const x = xBase + (col * 48 * dir);
+        positions[id] = { x, y: 40 + gap * row + gap / 2 };
+      });
+    };
+    place(sources, 64, +1);                 // источники слева
+    mids.forEach((id,i)=> positions[id] = { x: W/2 + (i%2?120:-120), y: 60 + i*46 });
+    place(sinks, W-64, -1);                  // ресурсы/получатели справа
+    if (!positions[hub]) positions[hub] = {x:W/2,y:H/2};
+  }
+  ids.forEach(id => { if(!positions[id]) positions[id] = { x: 40+Math.random()*(W-80), y: 40+Math.random()*(H-80) }; });
+
+  const cycleEdgeSet = new Set();
+  if (res.graphStats.cycle) {
+    const c = res.graphStats.cycle;
+    for (let i=0;i<c.length-1;i++) cycleEdgeSet.add(c[i]+'>'+c[i+1]);
+  }
+
+  // цвет узла по роли: пользователь-хаб (красный, пульсирует) / ресурс (фиолет) / хост (янтарь) / пользователь (синий)
+  const colorFor = (id) => {
+    const n = nodes[id];
+    if (id === hub) return '#dc2626';
+    if (n.kind === 'resource') return '#a855f7';
+    if (n.kind === 'host') return '#f59e0b';
+    return '#3b82f6'; // пользователь
+  };
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded-lg" style={{background:'#0b0f1a', border:'1px solid #26324a'}}>
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#64748b" />
+        </marker>
+        <marker id="arrC" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#dc2626" />
+        </marker>
+      </defs>
+      {cs.events.map((t,i)=> {
+        const a = positions[t.from], b = positions[t.to];
+        if(!a||!b) return null;
+        const isCyc = cycleEdgeSet.has(t.from+'>'+t.to);
+        return (
+          <g key={i}>
+            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke={isCyc?'#dc2626':'#3a4a66'} strokeWidth={isCyc?2.2:1.3}
+              markerEnd={isCyc?'url(#arrC)':'url(#arr)'} opacity="0.85" />
+          </g>
+        );
+      })}
+      {ids.map(id => {
+        const p = positions[id]; const n = nodes[id];
+        const r = id===hub ? 18 : 11;        // крупнее для читаемости на проекторе
+        return (
+          <g key={id}>
+            <circle cx={p.x} cy={p.y} r={r} fill={colorFor(id)} stroke="#0b0f1a" strokeWidth="2">
+              {id===hub && <animate attributeName="opacity" values="1;0.5;1" dur="1.8s" repeatCount="indefinite"/>}
+            </circle>
+            <text x={p.x} y={p.y - r - 4} textAnchor="middle" fill="#cbd5e1" fontSize="12" fontFamily="monospace" fontWeight="600">{id}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   КОМПОНЕНТЫ UI
+   --------------------------------------------------------------------- */
+const SEV = { crit:'#dc2626', bad:'#ef4444', warn:'#f59e0b', good:'#22c55e' };
+
+function ScoreRing({ score, color }) {
+  const R = 34, C = 2*Math.PI*R;
+  const off = C * (1 - score/100);
+  const col = SEV[color] || '#3b82f6';
+  return (
+    <div className="relative" style={{width:84,height:84}}>
+      <svg width="84" height="84" className="-rotate-90">
+        <circle cx="42" cy="42" r={R} stroke="#26324a" strokeWidth="7" fill="none"/>
+        <circle cx="42" cy="42" r={R} stroke={col} strokeWidth="7" fill="none"
+          strokeDasharray={C} strokeDashoffset={off} strokeLinecap="round"
+          style={{transition:'stroke-dashoffset .6s ease'}}/>
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-xl font-bold" style={{color:col}}>{score}</span>
+        <span className="text-[9px] text-slate-400">из 100</span>
+      </div>
+    </div>
+  );
+}
+
+function Tag({ children, sev='warn' }) {
+  const c = SEV[sev];
+  return <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{background:c+'22', color:c, border:'1px solid '+c+'55'}}>{children}</span>;
+}
+
+function App() {
+  const analyzed = useMemo(()=> CASES.map(c => ({ cs:c, res:analyze(c) })), []);
+  // сортировка очереди по убыванию score (приоритизация)
+  const queue = useMemo(()=> [...analyzed].sort((a,b)=> b.res.score - a.res.score), [analyzed]);
+  const [selId, setSelId] = useState(queue[0].cs.id);
+  const sel = analyzed.find(a => a.cs.id === selId);
+  const [alertThreshold, setAlertThreshold] = useState(55); // what-if: порог тревоги (жюри двигает сам)
+
+  const [apiKey, setApiKey] = useState('');
+  const [sarText, setSarText] = useState('');
+  const [sarLoading, setSarLoading] = useState(false);
+  const [sarMode, setSarMode] = useState('');
+
+  useEffect(()=> { setSarText(''); setSarMode(''); }, [selId]);
+
+  // метрики корпуса для жюри: confusion-matrix на ground-truth + recall@top-N + снижение тревог.
+  // Всё пересчитывается под порог тревоги alertThreshold (what-if — жюри двигает ползунок).
+  const corpusMetrics = useMemo(()=> {
+    const total = analyzed.length;
+    const illicit = analyzed.filter(a => isIllicit(a.cs)).length;
+    const benign = total - illicit;
+    let TP=0, FP=0, FN=0, TN=0;
+    analyzed.forEach(a => {
+      const flagged = a.res.score >= alertThreshold;
+      const bad = isIllicit(a.cs);
+      if (flagged && bad) TP++; else if (flagged && !bad) FP++;
+      else if (!flagged && bad) FN++; else TN++;
+    });
+    const precision = (TP+FP) ? TP/(TP+FP) : 1;
+    const recall = (TP+FN) ? TP/(TP+FN) : 1;
+    const f1 = (precision+recall) ? 2*precision*recall/(precision+recall) : 0;
+    const accuracy = total ? (TP+TN)/total : 0;
+    const alertsShown = TP+FP;
+    const ranked = [...analyzed].sort((a,b)=> b.res.score - a.res.score);
+    const hitsTopN = ranked.slice(0, illicit).filter(a => isIllicit(a.cs)).length;
+    const recallTopN = illicit ? Math.round((hitsTopN/illicit)*100) : 100;
+
+    // --- AUPRC (area under precision-recall curve) на ранжировании score корпуса ---
+    // Считаем честно по 9 точкам: идём по порогу сверху вниз, на каждом TP накапливаем
+    // precision×Δrecall (интерполяция прямоугольниками). Не accuracy — при дисбалансе ~0.1%
+    // accuracy бесполезна (пустышка = 99.9%). Стандарт для редких инсайдер-событий: AUC-PR.
+    let auprc = 0;
+    if (illicit) {
+      let tp = 0, fp = 0, prevRecall = 0;
+      ranked.forEach(a => {
+        if (isIllicit(a.cs)) tp++; else fp++;
+        const rec = tp / illicit;
+        const prec = (tp + fp) ? tp / (tp + fp) : 1;
+        auprc += prec * (rec - prevRecall); // прямоугольник precision на шаге recall
+        prevRecall = rec;
+      });
+    } else { auprc = 1; }
+
+    // --- ЧЕСТНЫЙ наивный baseline на ТОМ ЖЕ корпусе (модель периметрового DLP/SIEM) ---
+    // Грубое периметровое правило БЕЗ поведенческого baseline: флагает широко по сырому объёму
+    // (любой доступ ≥ NAIVE_VOLUME строк) ИЛИ по частоте (≥ NAIVE_EVENTS событий в окне). У такого
+    // правила нет понимания персональной нормы, поэтому оно: (1) ловит легит крупнообъёмный ETL/аудит
+    // как ЛОЖНУЮ тревогу (FP — отсюда индустриальные ~95% ложных алертов, SOC «тонет в FP») и
+    // (2) ПРОПУСКАЕТ тихих инсайдеров — боковое движение, эскалацию привилегий, компрометацию —
+    // потому что их объём/частота сами по себе ниже грубых порогов. Сравниваем честно: то же
+    // множество инцидентов, тот же ground-truth.
+    const NAIVE_VOLUME = 30000; // сырой объёмный порог DLP (без учёта персональной нормы)
+    const NAIVE_EVENTS = 5;     // сырой порог частоты/burst
+    const naiveFlags = a =>
+      a.cs.events.length >= NAIVE_EVENTS || a.cs.events.some(t => t.rows >= NAIVE_VOLUME);
+    let naiveTP = 0, naiveFP = 0, naiveFN = 0;
+    analyzed.forEach(a => {
+      const flagged = naiveFlags(a), bad = isIllicit(a.cs);
+      if (flagged && bad) naiveTP++;
+      else if (flagged && !bad) naiveFP++;
+      else if (!flagged && bad) naiveFN++;
+    });
+    const naiveAlerts = naiveTP + naiveFP;
+    // Снижение ложных тревог: наш инструмент против наивного DLP (в нашу пользу, без двойного минуса).
+    const reduction = naiveFP > 0 ? Math.max(0, Math.round((1 - FP / naiveFP) * 100)) : 0;
+    return { total, illicit, benign, TP, FP, FN, TN, precision, recall, f1, accuracy, alertsShown,
+      recallTopN, naiveAlerts, naiveTP, naiveFP, naiveFN, reduction, auprc };
+  }, [analyzed, alertThreshold]);
+
+  const genSAR = async () => {
+    if (apiKey.trim()) {
+      setSarLoading(true); setSarMode('claude');
+      try {
+        const t = await claudeSAR(sel.cs, sel.res, apiKey.trim());
+        setSarText(t);
+      } catch (e) {
+        setSarText('Ошибка вызова Claude API: ' + e.message + '\n\n--- Показан mock-черновик ---\n\n' + mockSAR(sel.cs, sel.res));
+        setSarMode('mock');
+      } finally { setSarLoading(false); }
+    } else {
+      setSarMode('mock');
+      setSarText(mockSAR(sel.cs, sel.res));
+    }
+  };
+
+  return (
+    <div className="min-h-full flex flex-col">
+      {/* HEADER */}
+      <header className="border-b border-edge bg-panel px-5 py-3 flex items-center justify-between sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center text-lg" style={{background:'linear-gradient(135deg,#1d4ed8,#dc2626)'}}>🛡️</div>
+          <div>
+            <h1 className="font-bold text-sm tracking-wide">AI SHIELD — INSIDER GUARD <span className="text-slate-400 font-normal">· детект инсайдерской угрозы и компрометации доступа</span></h1>
+            <p className="text-[11px] text-slate-500">Защита баз ПДн / финданных · UEBA на access/audit-логах · граф пользователь→ресурс→хост · объяснимый риск-скор для SOC</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4 text-[11px]">
+          <span className="flex items-center gap-1.5 text-good"><span className="w-1.5 h-1.5 rounded-full bg-good pulse-dot"></span>Поток логов активен (синтетика)</span>
+          <span className="text-slate-500 font-mono">AFM AI Hackathon 2026 · трек ai-shield</span>
+        </div>
+      </header>
+
+      {/* METRICS BAR (слайд жюри) */}
+      <div className="bg-panel2 border-b border-edge px-5 py-2.5 flex flex-wrap gap-x-7 gap-y-1 text-[12px]">
+        <Metric label="Инцидентов в очереди" val={corpusMetrics.total} />
+        <Metric label="Реальных угроз" val={`${corpusMetrics.illicit} типологий`} />
+        <Metric label={`Recall@top-${corpusMetrics.illicit}`} val={`${corpusMetrics.recallTopN}%`} good />
+        <Metric label="AUPRC (ранжирование)" val={corpusMetrics.auprc.toFixed(3)} good />
+        <Metric label="Ложных тревог: DLP → AI Shield" val={`${corpusMetrics.naiveFP} → ${corpusMetrics.FP}${corpusMetrics.reduction > 0 ? ` (−${corpusMetrics.reduction}%)` : ''}`} good title="Грубый периметровый DLP/SIEM флагает легит крупнообъёмный ETL/аудит как ложную тревогу (нет персонального baseline). AI Shield контекстом снимает её." />
+        <Metric label="Угроз поймано: DLP → AI Shield" val={`${corpusMetrics.naiveTP}/${corpusMetrics.illicit} → ${corpusMetrics.TP}/${corpusMetrics.illicit}`} good title="DLP/SIEM пропускает тихих инсайдеров (боковое движение / эскалация привилегий / компрометация) — их объём ниже грубых порогов. UEBA ловит по отклонению от персонального baseline." />
+        <Metric label="Метрика качества" val="AUPRC + recall@top-N, НЕ accuracy" warn title="Инсайдер-события редкие: классификатор-пустышка даёт ~99.9% accuracy и ловит ноль — поэтому меряем AUPRC и recall@top-N." />
+      </div>
+
+      <ValidationBar threshold={alertThreshold} setThreshold={setAlertThreshold} m={corpusMetrics} />
+
+      <div className="flex-1 grid grid-cols-12 gap-0 min-h-0">
+        {/* ОЧЕРЕДЬ ИНЦИДЕНТОВ */}
+        <aside className="col-span-3 border-r border-edge bg-panel overflow-y-auto">
+          <div className="px-4 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 border-b border-edge sticky top-0 bg-panel">
+            Приоритизированная очередь
+          </div>
+          {queue.map(({cs,res}) => {
+            const suppressed = res.score < alertThreshold;
+            return (
+            <button key={cs.id} onClick={()=>setSelId(cs.id)}
+              className={`w-full text-left px-4 py-3 border-b border-edge/60 transition fade-in ${selId===cs.id?'bg-panel2':'hover:bg-panel2/50'} ${suppressed?'opacity-45':''}`}
+              style={selId===cs.id?{borderLeft:'3px solid '+SEV[res.priority.color]}:{borderLeft:'3px solid transparent'}}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-mono text-[11px] text-slate-400">{cs.id}</span>
+                <span className="font-bold text-[16px]" style={{color:SEV[res.priority.color]}}>{res.score}</span>
+              </div>
+              <div className="text-[12px] leading-snug mb-1.5 text-slate-200">{cs.title}</div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Tag sev={res.priority.color}>{res.priority.lvl.split(' ')[0]}</Tag>
+                {suppressed
+                  ? <span className="text-[10px] text-slate-500 font-mono">⤓ подавлено (&lt; порога)</span>
+                  : <span className="text-[10px] text-slate-500">{cs.channel.split(' ').slice(0,2).join(' ')}…</span>}
+              </div>
+            </button>
+            );
+          })}
+          <div className="px-4 py-3 text-[10px] text-slate-600 leading-relaxed">
+            Очередь отсортирована по risk-score. SOC-аналитик работает сверху вниз — самое опасное первым.
+          </div>
+        </aside>
+
+        {/* DETAIL */}
+        <main className="col-span-9 overflow-y-auto p-5">
+          {sel && <Detail key={sel.cs.id} cs={sel.cs} res={sel.res}
+            apiKey={apiKey} setApiKey={setApiKey} onSelect={setSelId}
+            sarText={sarText} sarLoading={sarLoading} sarMode={sarMode} genSAR={genSAR} setSarText={setSarText} />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function ConfCell({ label, val, color }) {
+  return (
+    <div className="rounded-lg px-2.5 py-1.5 text-center border min-w-[64px]" style={{ borderColor: color + '55', background: color + '11' }}>
+      <div className="font-mono font-bold text-lg leading-none" style={{ color }}>{val}</div>
+      <div className="text-[11px] text-slate-400 leading-tight mt-0.5">{label}</div>
+    </div>
+  );
+}
+function ValMetric({ label, value, color, dim }) {
+  return (
+    <div className="text-center">
+      <div className="font-mono font-bold text-[18px] leading-tight" style={{ color }}>{value}</div>
+      <div className={`text-[10px] uppercase ${dim ? 'text-slate-600' : 'text-slate-500'}`}>{label}</div>
+    </div>
+  );
+}
+function ValidationBar({ threshold, setThreshold, m }) {
+  const pct = v => Math.round(v * 100) + '%';
+  const f1col = m.f1 >= 0.99 ? '#22c55e' : m.f1 >= 0.8 ? '#f59e0b' : '#ef4444';
+  return (
+    <div className="bg-panel border-b border-edge px-5 py-3">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div className="flex-1 min-w-[280px]">
+          <div className="flex items-center justify-between text-[11px] mb-1">
+            <span className="uppercase tracking-wider text-slate-500">What-if · порог тревоги (score ≥)</span>
+            <span className="font-mono text-accent">≥ {threshold}</span>
+          </div>
+          <input type="range" min="0" max="100" value={threshold} onChange={e => setThreshold(+e.target.value)} className="w-full accent-blue-500" />
+          <div className="flex justify-between text-[9px] text-slate-600 mt-0.5">
+            <span>0 · всё в тревоги (FP↑)</span><span>55 · баланс</span><span>100 · молчим (FN↑)</span>
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">
+            SOC-аналитику показано <span className="text-slate-300 font-mono">{m.alertsShown}</span> из {m.total} инцидентов (ниже порога — подавлено, экономим время аналитика).
+            Метрики на синтетическом ground-truth: {m.illicit} реальных угроз / {m.benign} легит (ETL-сервис, плановый аудит).
+          </p>
+          <p className="text-[10px] text-warn/90 mt-1 leading-snug">
+            ⚠ Инсайдер-события редкие: классификатор-пустышка даёт ~99.9% accuracy и ловит ноль — поэтому меряем AUPRC и recall@top-N, а не accuracy. Реальные инсайдеры маскируются под норму, поэтому держим консервативный baseline.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <ConfCell label="поймано TP" val={m.TP} color="#22c55e" />
+          <ConfCell label="лож. тревоги FP" val={m.FP} color="#ef4444" />
+          <ConfCell label="пропуски FN" val={m.FN} color="#f59e0b" />
+          <ConfCell label="верно сняты TN" val={m.TN} color="#3b82f6" />
+        </div>
+        <div className="flex items-center gap-4 pl-4 border-l border-edge">
+          <ValMetric label="Precision" value={pct(m.precision)} color={m.precision >= 0.99 ? '#22c55e' : '#f59e0b'} />
+          <ValMetric label="Recall" value={pct(m.recall)} color={m.recall >= 0.99 ? '#22c55e' : '#f59e0b'} />
+          <ValMetric label="F1" value={pct(m.f1)} color={f1col} />
+          <ValMetric label="accuracy ⚠" value={pct(m.accuracy)} color="#64748b" dim />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, val, good, warn, title }) {
+  const col = good ? '#22c55e' : warn ? '#f59e0b' : '#e5e9f0';
+  return (
+    <div className="flex flex-col" title={title} style={title ? {cursor:'help'} : undefined}>
+      <span className="text-slate-500">{label}{title ? ' ⓘ' : ''}</span>
+      <span className="font-mono font-semibold text-[14px]" style={{color:col}}>{val}</span>
+    </div>
+  );
+}
+
+function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genSAR, onSelect }) {
+  const related = relatedCases(cs);
+  return (
+    <div className="fade-in space-y-4">
+      {/* HEAD */}
+      <div className="flex items-start justify-between gap-4 bg-panel rounded-xl border border-edge p-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="font-mono text-xs text-slate-400">{cs.id}</span>
+            <Tag sev={res.priority.color}>{res.priority.lvl}</Tag>
+          </div>
+          <h2 className="text-lg font-bold mb-1">{cs.title}</h2>
+          <p className="text-[12px] text-slate-400 mb-2">Источник сигнала: <span className="text-slate-300">{cs.channel}</span></p>
+          <p className="text-[13px] text-slate-300 leading-relaxed">{cs.facts}</p>
+          {cs.source && (
+            <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+              <span className="text-slate-400 font-semibold">Источник методики:</span> {cs.source}
+            </p>
+          )}
+          {related.length > 0 && (
+            <div className="mt-2.5 flex items-center gap-2 flex-wrap text-[11px]">
+              <span className="text-slate-500 uppercase tracking-wider text-[10px]">Связанные инциденты:</span>
+              {related.map(rc => (
+                <button key={rc.id} onClick={()=> onSelect && onSelect(rc.id)}
+                  title={rc.title}
+                  className="font-mono rounded px-2 py-0.5 transition hover:brightness-125"
+                  style={{ background:'#a855f722', color:'#c084fc', border:'1px solid #a855f755' }}>
+                  ⇄ {rc.id} · общий скомпрометированный маркер
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] mt-2" style={{color:SEV[res.priority.color]}}>▸ {res.priority.note}</p>
+        </div>
+        <div className="flex flex-col items-center gap-1 shrink-0">
+          <ScoreRing score={res.score} color={res.priority.color} />
+          <span className="text-[10px] text-slate-500">risk-score</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        {/* ГРАФ */}
+        <div className="bg-panel rounded-xl border border-edge p-4">
+          <h3 className="text-[12px] uppercase tracking-wider text-slate-500 mb-2">Граф доступа: пользователь → ресурс → хост</h3>
+          <GraphView cs={cs} res={res} />
+          <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-slate-400">
+            <Legend c="#dc2626" t="узел в центре инцидента (хаб)" />
+            <Legend c="#3b82f6" t="пользователь" />
+            <Legend c="#a855f7" t="ресурс (БД ПДн/финданные)" />
+            <Legend c="#f59e0b" t="хост" />
+          </div>
+          <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+            <Stat k="Узлов" v={res.graphStats.nodes} />
+            <Stat k="Событий" v={res.graphStats.edges} />
+            <Stat k="Объём, строк" v={fmt(res.graphStats.totalRows)} />
+          </div>
+        </div>
+
+        {/* SHAP / ОБЪЯСНИМОСТЬ */}
+        <div className="bg-panel rounded-xl border border-edge p-4">
+          <h3 className="text-[12px] uppercase tracking-wider text-slate-500 mb-1">Почему помечено — вклад факторов</h3>
+          <p className="text-[10px] text-slate-600 mb-3">SHAP-подобная аддитивная декомпозиция (сумма вкладов = score): какой триггер сколько добавил. Объяснимость каждого алерта = регуляторное требование (EU AI Act; трассируемые логи для SOC и расследования инцидентов с ПДн).</p>
+          <div className="space-y-2.5">
+            {res.shap.length === 0 && <p className="text-[12px] text-good">Аномалий не выявлено — ложная тревога не сформирована.</p>}
+            {res.shap.map((s,i)=> (
+              <div key={i} className="fade-in">
+                <div className="flex items-center justify-between text-[12px] mb-0.5">
+                  <span className="flex items-center gap-1.5">
+                    <Tag sev={s.severity}>{s.code}</Tag>
+                    <span className="text-slate-200">{s.label}</span>
+                  </span>
+                  <span className="font-mono font-bold text-[16px]" style={{color:SEV[s.severity]}}>+{s.contribution}</span>
+                </div>
+                <div className="w-full h-1.5 rounded bg-edge overflow-hidden">
+                  <div className="h-full rounded" style={{width:`${Math.min(100,s.contribution/Math.max(1,res.score)*100)}%`, background:SEV[s.severity], transition:'width .5s'}}></div>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1 leading-snug">{s.detail}</p>
+              </div>
+            ))}
+            {res.mitigation && (
+              <div className="mt-1 flex items-start gap-2 text-[11px] rounded-lg p-2 border" style={{ borderColor: '#22c55e55', background: '#22c55e11' }}>
+                <span className="text-good font-mono whitespace-nowrap font-semibold">− контекст</span>
+                <span className="text-slate-300">{res.mitigation.note} Итоговый риск ×{res.mitigation.factor}.</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* РЕКОМЕНДАЦИИ (IR-плейбук) */}
+      <div className="bg-panel rounded-xl border border-edge p-4">
+        <h3 className="text-[12px] uppercase tracking-wider text-slate-500 mb-2">Плейбук реагирования (Incident Response)</h3>
+        <ul className="space-y-1.5">
+          {(RESPONSE[cs.typology]||[]).map((r,i)=> (
+            <li key={i} className="text-[13px] text-slate-300 flex gap-2">
+              <span className="text-accent font-mono">{i+1}.</span><span>{r}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* IR-ОТЧЁТ ГЕНЕРАЦИЯ */}
+      <div className="bg-panel rounded-xl border border-edge p-4">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <h3 className="text-[12px] uppercase tracking-wider text-slate-500">Черновик инцидент-отчёта (Incident Response)</h3>
+          <div className="flex items-center gap-2">
+            <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+              placeholder="Anthropic API-ключ (опц.) — иначе mock"
+              className="text-[11px] bg-ink border border-edge rounded px-2 py-1 w-64 font-mono focus:border-accent outline-none" />
+            <button onClick={genSAR} disabled={sarLoading}
+              className="text-[12px] font-semibold bg-accent hover:bg-blue-600 disabled:opacity-50 rounded px-3 py-1.5 transition">
+              {sarLoading ? 'Генерация…' : '▸ Сформировать черновик'}
+            </button>
+          </div>
+        </div>
+        {sarMode && <p className="text-[10px] mb-2" style={{color: sarMode==='claude'?'#22c55e':'#f59e0b'}}>
+          {sarMode==='claude' ? '● Сгенерировано через Claude (claude-sonnet-4-6)' : '● Mock-режим (детерминированный шаблон, без сети)'}
+        </p>}
+        {sarText
+          ? <pre className="text-[11.5px] text-slate-300 whitespace-pre-wrap leading-relaxed bg-ink rounded-lg p-3 border border-edge font-mono fade-in">{sarText}</pre>
+          : <p className="text-[12px] text-slate-600">Нажмите «Сформировать черновик» — движок соберёт инцидент-отчёт из триггеров (mock) или вызовет Claude, если введён ключ.</p>}
+      </div>
+
+      <p className="text-[10px] text-slate-600 text-center pb-3">⚠ Все данные синтетические (ИИН / ФИО / IP вымышлены). Прототип защиты данных для AFM AI Hackathon 2026. Не является процессуальным решением.</p>
+    </div>
+  );
+}
+
+function Legend({ c, t }) {
+  return <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full" style={{background:c}}></span>{t}</span>;
+}
+function Stat({ k, v }) {
+  return <div className="bg-ink rounded p-2 border border-edge"><div className="text-[9px] text-slate-500">{k}</div><div className="font-mono text-slate-200">{v}</div></div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

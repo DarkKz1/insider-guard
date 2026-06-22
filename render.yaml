@@ -1,0 +1,19 @@
+# Render blueprint (fallback). SQLite persisted on a mounted disk.
+services:
+  - type: web
+    name: ai-shield
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run seed -- --keep && npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /data/insider.db
+      - key: NODE_VERSION
+        value: "20"

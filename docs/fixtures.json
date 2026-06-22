@@ -1,0 +1,523 @@
+{
+  "GET /api/health": {
+    "ok": true,
+    "db": "up",
+    "version": "1.0.0"
+  },
+  "GET /api/dataset": {
+    "id": "ds_BoapoVbtvr",
+    "name": "Корпус-демо (синтетика)",
+    "source": "seed",
+    "createdAt": "2026-06-22T11:22:45.403Z",
+    "active": true,
+    "eventCount": 12344,
+    "userCount": 40,
+    "dayCount": 30,
+    "resourceCount": 18,
+    "hostCount": 16,
+    "incidentCount": 13,
+    "hasGroundTruth": true,
+    "summary": {
+      "critical": 2,
+      "high": 6,
+      "medium": 5,
+      "low": 0
+    },
+    "heroStat": {
+      "threats": 8,
+      "critical": 2
+    },
+    "window": {
+      "from": "2026-05-21T01:06:00",
+      "to": "2026-06-19T18:34:00"
+    },
+    "baselineNote": "baseline вычислен из истории каждого пользователя (avg rows/day, типичные часы, известные ресурсы/хосты)"
+  },
+  "GET /api/datasets": {
+    "datasets": [
+      {
+        "id": "ds_g99dSOK37E",
+        "name": "nolabel.csv",
+        "source": "upload",
+        "eventCount": 2,
+        "userCount": 1,
+        "incidentCount": 2,
+        "hasGroundTruth": false,
+        "createdAt": "2026-06-22T11:23:03.125Z",
+        "active": false
+      },
+      {
+        "id": "ds_UXNDqBGlEO",
+        "name": "sample.csv",
+        "source": "upload",
+        "eventCount": 7,
+        "userCount": 1,
+        "incidentCount": 1,
+        "hasGroundTruth": true,
+        "createdAt": "2026-06-22T11:23:03.031Z",
+        "active": false
+      },
+      {
+        "id": "ds_MyIVffina2",
+        "name": "contract-test-upload",
+        "source": "upload",
+        "eventCount": 25,
+        "userCount": 1,
+        "incidentCount": 1,
+        "hasGroundTruth": true,
+        "createdAt": "2026-06-22T11:22:47.717Z",
+        "active": false
+      },
+      {
+        "id": "ds_BoapoVbtvr",
+        "name": "Корпус-демо (синтетика)",
+        "source": "seed",
+        "eventCount": 12344,
+        "userCount": 40,
+        "incidentCount": 13,
+        "hasGroundTruth": true,
+        "createdAt": "2026-06-22T11:22:45.403Z",
+        "active": true
+      }
+    ]
+  },
+  "GET /api/incidents": {
+    "note": "truncated to first 3",
+    "datasetId": "ds_BoapoVbtvr",
+    "total": 13,
+    "incidents": [
+      {
+        "id": "INC-0001-BoapoVbtvr",
+        "user": "U-ANALYST-3",
+        "role": "analyst",
+        "typology": "mass_exfil",
+        "title": "Массовая выгрузка: 128 652 строк при baseline 9 040/день (×14)",
+        "channel": "db",
+        "score": 89,
+        "priority": {
+          "lvl": "P1 — Критический",
+          "color": "crit",
+          "note": "Немедленное реагирование SOC / отзыв сессии"
+        },
+        "primaryTrigger": {
+          "code": "VOLUME_ANOMALY",
+          "label": "Объём"
+        },
+        "windowDate": "2026-06-14",
+        "rowsTouched": 128652,
+        "eventCount": 15,
+        "label": {
+          "malicious": true,
+          "typology": "staging_exfil"
+        }
+      },
+      {
+        "id": "INC-0002-BoapoVbtvr",
+        "user": "U-ANALYST-1",
+        "role": "analyst",
+        "typology": "off_hours",
+        "title": "Всплеск активности вне рабочих часов: 92 697 строк",
+        "channel": "db",
+        "score": 81,
+        "priority": {
+          "lvl": "P1 — Критический",
+          "color": "crit",
+          "note": "Немедленное реагирование SOC / отзыв сессии"
+        },
+        "primaryTrigger": {
+          "code": "OFF_HOURS_VELOCITY",
+          "label": "Вне часов"
+        },
+        "windowDate": "2026-06-09",
+        "rowsTouched": 92697,
+        "eventCount": 21,
+        "label": {
+          "malicious": true,
+          "typology": "mass_exfil"
+        }
+      },
+      {
+        "id": "INC-0003-BoapoVbtvr",
+        "user": "U-CLERK-1",
+        "role": "clerk",
+        "typology": "mass_exfil",
+        "title": "Массовая выгрузка: 16 940 строк при baseline 1 684/день (×10)",
+        "channel": "db",
+        "score": 73,
+        "priority": {
+          "lvl": "P2 — Высокий",
+          "color": "bad",
+          "note": "В очередь на расследование в течение суток"
+        },
+        "primaryTrigger": {
+          "code": "VOLUME_ANOMALY",
+          "label": "Объём"
+        },
+        "windowDate": "2026-06-15",
+        "rowsTouched": 16940,
+        "eventCount": 12,
+        "label": {
+          "malicious": true,
+          "typology": "compromise"
+        }
+      }
+    ]
+  },
+  "GET /api/incidents/:id": {
+    "id": "INC-0001-BoapoVbtvr",
+    "datasetId": "ds_BoapoVbtvr",
+    "user": "U-ANALYST-3",
+    "role": "analyst",
+    "typology": "mass_exfil",
+    "title": "Массовая выгрузка: 128 652 строк при baseline 9 040/день (×14)",
+    "channel": "db",
+    "windowDate": "2026-06-14",
+    "score": 89,
+    "priority": {
+      "lvl": "P1 — Критический",
+      "color": "crit",
+      "note": "Немедленное реагирование SOC / отзыв сессии"
+    },
+    "baseline": {
+      "avg_rows_per_day": 9040,
+      "work_hours": [
+        8,
+        18
+      ],
+      "known_resources": [
+        "DB-REF",
+        "DB-PERSONS",
+        "DB-TAX"
+      ],
+      "known_hosts": [
+        "H-WS-3"
+      ],
+      "home_geo": "Астана",
+      "dayCountObserved": 21,
+      "established": true,
+      "volume_cv": 0.34,
+      "source": "computed-from-history"
+    },
+    "observed": {
+      "rowsTouched": 128652,
+      "eventCount": 15,
+      "hours": [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        19
+      ],
+      "resources": [
+        "DB-REF",
+        "DB-TAX",
+        "DB-PERSONS"
+      ],
+      "hosts": [
+        "H-WS-3"
+      ],
+      "exportRows": 58000,
+      "selectRows": 70652
+    },
+    "triggers": [
+      {
+        "code": "VOLUME_ANOMALY",
+        "label": "Аномальный объём выгрузки",
+        "weight": 28,
+        "detail": "Пользователь U-ANALYST-3 обратился к 128 652 строкам при персональном baseline 9 040/день (×14). Объём несовместим с должностными обязанностями — слепок массовой эксфильтрации.",
+        "severity": "bad"
+      },
+      {
+        "code": "BULK_EXFIL",
+        "label": "Молниеносная выгрузка наружу",
+        "weight": 24,
+        "detail": "1 операц(ия/ий) EXPORT/download (58 000 строк) сразу после массового чтения. Данные покидают периметр — активная эксфильтрация.",
+        "severity": "crit"
+      },
+      {
+        "code": "OFF_HOURS_VELOCITY",
+        "label": "Активность вне рабочих часов + всплеск",
+        "weight": 20,
+        "detail": "2 операц(ия/ий) вне work_hours 8:00–18:00 / в выходной (118 000 строк), на фоне всплеска активности. Поведение вне персонального профиля времени.",
+        "severity": "bad"
+      },
+      {
+        "code": "COVERT_CHANNEL",
+        "label": "Выгрузка по скрытому каналу",
+        "weight": 12,
+        "detail": "1 выгрузк(а/и) через cloud (облако/мессенджер/личная почта). Обход корпоративных каналов передачи данных.",
+        "severity": "warn"
+      }
+    ],
+    "shap": [
+      {
+        "code": "VOLUME_ANOMALY",
+        "label": "Аномальный объём выгрузки",
+        "severity": "bad",
+        "contribution": 30
+      },
+      {
+        "code": "BULK_EXFIL",
+        "label": "Молниеносная выгрузка наружу",
+        "severity": "crit",
+        "contribution": 25
+      },
+      {
+        "code": "OFF_HOURS_VELOCITY",
+        "label": "Активность вне рабочих часов + всплеск",
+        "severity": "bad",
+        "contribution": 21
+      },
+      {
+        "code": "COVERT_CHANNEL",
+        "label": "Выгрузка по скрытому каналу",
+        "severity": "warn",
+        "contribution": 13
+      }
+    ],
+    "mitigation": null,
+    "graph": {
+      "nodes": [
+        {
+          "id": "U-ANALYST-3",
+          "kind": "user",
+          "label": "U-ANALYST-3",
+          "onPath": true,
+          "isHub": true,
+          "inRows": 0,
+          "outRows": 128652
+        },
+        {
+          "id": "DB-REF",
+          "kind": "resource",
+          "label": "DB-REF",
+          "onPath": true,
+          "isHub": false,
+          "inRows": 4209,
+          "outRows": 0
+        },
+        {
+          "id": "DB-TAX",
+          "kind": "resource",
+          "label": "DB-TAX",
+          "onPath": true,
+          "isHub": false,
+          "inRows": 6443,
+          "outRows": 0
+        },
+        {
+          "id": "H-WS-3",
+          "kind": "host",
+          "label": "H-WS-3",
+          "onPath": false,
+          "isHub": false,
+          "inRows": 0,
+          "outRows": 0
+        },
+        {
+          "id": "DB-PERSONS",
+          "kind": "resource",
+          "label": "DB-PERSONS",
+          "onPath": true,
+          "isHub": false,
+          "inRows": 118000,
+          "outRows": 0
+        }
+      ],
+      "edges": [
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-REF",
+          "action": "SELECT",
+          "rows": 1312,
+          "ts": "2026-06-14T09:01:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-REF",
+          "action": "SELECT",
+          "rows": 486,
+          "ts": "2026-06-14T09:07:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 238,
+          "ts": "2026-06-14T10:05:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 691,
+          "ts": "2026-06-14T10:35:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 1684,
+          "ts": "2026-06-14T11:24:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "H-WS-3",
+          "to": "H-WS-3",
+          "action": "LOGIN",
+          "rows": 0,
+          "ts": "2026-06-14T12:31:00",
+          "channel": "rdp",
+          "crit": false
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 926,
+          "ts": "2026-06-14T12:36:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-REF",
+          "action": "SELECT",
+          "rows": 327,
+          "ts": "2026-06-14T12:48:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-REF",
+          "action": "SELECT",
+          "rows": 838,
+          "ts": "2026-06-14T13:59:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 1001,
+          "ts": "2026-06-14T14:10:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 1084,
+          "ts": "2026-06-14T15:36:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-TAX",
+          "action": "SELECT",
+          "rows": 819,
+          "ts": "2026-06-14T15:53:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-REF",
+          "action": "SELECT",
+          "rows": 1246,
+          "ts": "2026-06-14T16:39:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-PERSONS",
+          "action": "SELECT",
+          "rows": 60000,
+          "ts": "2026-06-14T19:40:00",
+          "channel": "db",
+          "crit": true
+        },
+        {
+          "from": "U-ANALYST-3",
+          "to": "DB-PERSONS",
+          "action": "EXPORT",
+          "rows": 58000,
+          "ts": "2026-06-14T19:58:00",
+          "channel": "cloud",
+          "crit": true
+        }
+      ],
+      "hub": "U-ANALYST-3",
+      "cycle": null
+    },
+    "related": [],
+    "playbook": [
+      "Немедленно отозвать активную сессию и токены пользователя, заблокировать аккаунт.",
+      "Запросить у владельца ресурса (БД физлиц) подтверждение легитимности массовой выборки.",
+      "Зафиксировать объём выгруженных ПДн, инициировать оценку ущерба; эскалация в CISO/КНБ."
+    ],
+    "label": {
+      "malicious": true,
+      "typology": "staging_exfil"
+    }
+  },
+  "GET /api/metrics?threshold=55": {
+    "datasetId": "ds_BoapoVbtvr",
+    "hasGroundTruth": true,
+    "threshold": 55,
+    "corpus": {
+      "total": 905,
+      "illicit": 8,
+      "benign": 897,
+      "eventCount": 12344,
+      "userCount": 40,
+      "dayCount": 30
+    },
+    "confusion": {
+      "TP": 8,
+      "FP": 0,
+      "FN": 0,
+      "TN": 897
+    },
+    "quality": {
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "accuracy": 1,
+      "auprc": 1,
+      "recallTopN": 100,
+      "alertsShown": 8
+    },
+    "naive": {
+      "naiveTP": 8,
+      "naiveFP": 5,
+      "naiveFN": 0,
+      "naiveAlerts": 13,
+      "reduction": 100
+    },
+    "note": null
+  },
+  "POST /api/report/:id": {
+    "id": "INC-0001-BoapoVbtvr",
+    "mode": "mock",
+    "text": "ЧЕРНОВИК ИНЦИДЕНТ-ОТЧЁТА (Incident Response) — INC-0001-BoapoVbtvr\nДата формирования: 2026-06-22 | Сформировано автоматически SOC-движком UEBA, требует проверки аналитиком.\n\n1. РЕЗЮМЕ ИНЦИДЕНТА. По учётной записи «U-ANALYST-3» (роль: analyst, источник сигнала: db) выявлены признаки несанкционированной/аномальной активности привилегированного пользователя за 2026-06-14. Присвоен risk-score 89/100, приоритет P1 — Критический. Тип инцидента: Массовая выгрузка: 128 652 строк при baseline 9 040/день (×14).\n\n2. ХРОНОЛОГИЯ СОБЫТИЙ:\n   2026-06-14T09:01:00 · U-ANALYST-3 · SELECT · DB-REF · 1 312 строк · db\n   2026-06-14T09:07:00 · U-ANALYST-3 · SELECT · DB-REF · 486 строк · db\n   2026-06-14T10:05:00 · U-ANALYST-3 · SELECT · DB-TAX · 238 строк · db\n   2026-06-14T10:35:00 · U-ANALYST-3 · SELECT · DB-TAX · 691 строк · db\n   2026-06-14T11:24:00 · U-ANALYST-3 · SELECT · DB-TAX · 1 684 строк · db\n   2026-06-14T12:31:00 · U-ANALYST-3 · LOGIN · H-WS-3 · — · rdp\n   2026-06-14T12:36:00 · U-ANALYST-3 · SELECT · DB-TAX · 926 строк · db\n   2026-06-14T12:48:00 · U-ANALYST-3 · SELECT · DB-REF · 327 строк · db\n   2026-06-14T13:59:00 · U-ANALYST-3 · SELECT · DB-REF · 838 строк · db\n   2026-06-14T14:10:00 · U-ANALYST-3 · SELECT · DB-TAX · 1 001 строк · db\n   2026-06-14T15:36:00 · U-ANALYST-3 · SELECT · DB-TAX · 1 084 строк · db\n   2026-06-14T15:53:00 · U-ANALYST-3 · SELECT · DB-TAX · 819 строк · db\n   2026-06-14T16:39:00 · U-ANALYST-3 · SELECT · DB-REF · 1 246 строк · db\n   2026-06-14T19:40:00 · U-ANALYST-3 · SELECT · DB-PERSONS · 60 000 строк · db\n   2026-06-14T19:58:00 · U-ANALYST-3 · EXPORT · DB-PERSONS · 58 000 строк · cloud\n\n3. ЗАТРОНУТЫЕ РЕСУРСЫ И ОБЪЁМ ДАННЫХ. В графе доступа 5 узлов (пользователи/ресурсы/хосты), 15 событий, совокупный объём доступа 128 652 строк. Baseline пользователя вычислен из истории: 9 040 строк/день, рабочие часы 8:00–18:00.\n\n4. ИНДИКАТОРЫ (триггеры детект-движка UEBA):\n• Аномальный объём выгрузки: Пользователь U-ANALYST-3 обратился к 128 652 строкам при персональном baseline 9 040/день (×14). Объём несовместим с должностными обязанностями — слепок массовой эксфильтрации.\n• Молниеносная выгрузка наружу: 1 операц(ия/ий) EXPORT/download (58 000 строк) сразу после массового чтения. Данные покидают периметр — активная эксфильтрация.\n• Активность вне рабочих часов + всплеск: 2 операц(ия/ий) вне work_hours 8:00–18:00 / в выходной (118 000 строк), на фоне всплеска активности. Поведение вне персонального профиля времени.\n• Выгрузка по скрытому каналу: 1 выгрузк(а/и) через cloud (облако/мессенджер/личная почта). Обход корпоративных каналов передачи данных.\n\n5. РЕКОМЕНДАЦИИ ПО РЕАГИРОВАНИЮ / СДЕРЖИВАНИЮ:\n1. Немедленно отозвать активную сессию и токены пользователя, заблокировать аккаунт.\n2. Запросить у владельца ресурса (БД физлиц) подтверждение легитимности массовой выборки.\n3. Зафиксировать объём выгруженных ПДн, инициировать оценку ущерба; эскалация в CISO/КНБ.\n\nПримечание: документ — машинный черновик для ускорения работы SOC/инцидент-аналитика. Не является процессуальным решением. Все данные в прототипе синтетические (ИИН/ФИО/IP вымышлены)."
+  }
+}

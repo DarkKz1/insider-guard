@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI Shield — Insider Guard · детект инсайдерской угрозы (UEBA)</title>
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
+<script src="./vendor/babel.min.js"></script>
+<script src="./vendor/tailwind.js"></script>
+<script>
+  // Babel standalone (новые версии) по умолчанию транспилирует JSX в automatic runtime
+  // и эмитит `import {jsx} from "react/jsx-runtime"` → инжектится как classic <script> →
+  // SyntaxError "Cannot use import statement outside a module", React не монтируется.
+  // Регистрируем пресет с classic runtime (React.createElement) — версионно-независимый фикс.
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]],
+  });
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          // Neutral SOC surface ladder — элевация ЦВЕТОМ, не тенями. БЕЗ сине-фиолетового tint.
+          ink:     '#07080A',   // canvas (base)
+          surface: '#0D0D0D',   // app background
+          panel:   '#101111',   // elevated panel
+          panel2:  '#121212',   // card
+          panel3:  '#1A1A1B',   // hover / active
+          edge:    'rgba(255,255,255,0.08)',  // hairline soft
+          edge2:   'rgba(255,255,255,0.16)',  // hairline strong / focus
+          accent:  '#57C1FF',   // info / active (signal-only)
+          accent2: '#3aa6e8',
+          // status-light system (насыщенный цвет = ТОЛЬКО сигнал). Ключи crit/bad/warn/good несут логику.
+          good:  '#59D499',     // ok / low
+          warn:  '#FFC533',     // warning / medium
+          high:  '#FFC533',     // high
+          bad:   '#FF6161',     // high
+          crit:  '#FF6161',     // critical
+          // текст-лестница (5 уровней)
+          ink1:  '#F4F4F6',
+          ink2:  '#CDCDCD',
+          ink3:  '#9C9C9D',
+          ink4:  '#6A6B6C',
+          ink5:  '#434345',
+          muted: '#6A6B6C',
+        },
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        },
+        letterSpacing: {
+          tightest: '-0.04em',
+        },
+      }
+    }
+  }
+</script>
+<style>
+  html, body, #root { height: 100%; }
+  body {
+    background: #07080A;   /* строго нейтральный canvas, без сине-фиолетового tint */
+    color: #CDCDCD;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    letter-spacing: -0.005em;
+  }
+  /* very faint neutral ops grid — текстура, не декор */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.014) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.014) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(circle at 50% -10%, black, transparent 70%);
+  }
+  #root { position: relative; z-index: 1; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.20); background-clip: padding-box; }
+
+  /* headings: Inter, tight tracking */
+  h1, h2, h3 { letter-spacing: -0.04em; }
+  /* все данные — tabular mono */
+  .kpi-tick, .mono-num { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+  .fade-in { animation: fade .26s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px);} to {opacity:1; transform:none;} }
+
+  /* hop-by-hop attack-path build: «прорисовка» ребра (stroke-dashoffset) + проявление подписи/узла */
+  @keyframes drawEdge { from { stroke-dashoffset: var(--len, 200); opacity: .2; } to { stroke-dashoffset: 0; opacity: 1; } }
+  @keyframes hopLabel { from { opacity: 0; } to { opacity: 1; } }
+  .node-pop { animation: nodePop .42s cubic-bezier(.2,.8,.25,1.2) both; transform-box: fill-box; transform-origin: center; }
+  @keyframes nodePop { 0% { opacity: 0; transform: scale(.4); } 60% { opacity: 1; transform: scale(1.12); } 100% { opacity: 1; transform: scale(1); } }
+
+  /* единственный live-pulse: на 1 critical-узле/индикаторе. Без box-shadow/glow — только opacity-ring. */
+  .beacon { position: relative; }
+  .beacon::after {
+    content:""; position:absolute; inset:-3px; border-radius:9999px;
+    border:1px solid currentColor; opacity:.45; animation: beacon 2s ease-out infinite;
+  }
+  @keyframes beacon { 0%{transform:scale(.75);opacity:.5;} 100%{transform:scale(1.7);opacity:0;} }
+
+  /* range slider (what-if threshold) — нейтральная дорожка, статус-градиент на заполнении */
+  input[type="range"].soc { -webkit-appearance:none; appearance:none; height:5px; border-radius:9999px;
+    background: linear-gradient(90deg, #59D499 0%, #FFC533 50%, #FF6161 100%); outline:none; }
+  input[type="range"].soc::-webkit-slider-thumb { -webkit-appearance:none; appearance:none;
+    width:16px; height:16px; border-radius:9999px; background:#101111; border:2px solid #57C1FF;
+    cursor:pointer; transition:transform .12s ease-out; }
+  input[type="range"].soc::-webkit-slider-thumb:hover { transform:scale(1.12); }
+  input[type="range"].soc::-moz-range-thumb { width:16px; height:16px; border-radius:9999px; background:#101111;
+    border:2px solid #57C1FF; cursor:pointer; }
+
+  /* card surface — элевация цветом (panel2), hairline-бордер задаётся классом border-edge */
+  .panel-card { background: #121212; }
+  .panel-elevated { background: #101111; }
+  .scanline { background: repeating-linear-gradient(180deg, transparent 0 2px, rgba(255,255,255,0.012) 2px 3px); }
+  .hl-glow { /* glow убран по брифу — оставлено как no-op для совместимости className */ }
+  .count-up { animation: countup .5s ease-out; }
+  @keyframes countup { from { opacity:.3; } to { opacity:1; } }
+
+  /* === NEW: skeleton-плитки для async-загрузки (данные теперь сетевые) === */
+  .skel { position: relative; overflow: hidden; background: rgba(255,255,255,0.04); border-radius: 8px; }
+  .skel::after { content:""; position:absolute; inset:0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+    transform: translateX(-100%); animation: shimmer 1.3s infinite; }
+  @keyframes shimmer { 100% { transform: translateX(100%); } }
+  /* индетерминантный прогресс «движок считает» */
+  .indet { position: relative; overflow: hidden; background: rgba(255,255,255,0.06); border-radius: 9999px; }
+  .indet::after { content:""; position:absolute; top:0; bottom:0; width:40%; border-radius:9999px;
+    background: linear-gradient(90deg, transparent, #57C1FF, transparent); animation: indet 1.1s ease-in-out infinite; }
+  @keyframes indet { 0% { left:-40%; } 100% { left:100%; } }
+  /* drag-drop зона */
+  .dropzone { border: 1.5px dashed rgba(255,255,255,0.16); transition: border-color .15s, background .15s; }
+  .dropzone.over { border-color: #57C1FF; background: rgba(87,193,255,0.05); }
+  /* spinner */
+  .spin { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react-classic">
+const { useState, useMemo, useEffect, useRef, useCallback } = React;
+
+/* =====================================================================
+   AI Shield — Insider Guard · трек AI Shield (id: ai-shield), AFM AI Hackathon 2026
+   --------------------------------------------------------------------------------
+   ОТЛИЧИЕ ОТ МОКАПА: данные больше НЕ захардкожены в браузере. Движок UEBA
+   (server/engine.js) считает baseline ИЗ ИСТОРИИ КАЖДОГО ПОЛЬЗОВАТЕЛЯ на бэкенде
+   (Node + SQLite) над ПРОИЗВОЛЬНЫМ массивом событий любого размера. Фронт лишь
+   рисует то, что движок уже посчитал — через REST API:
+     GET  /api/dataset            — шапка/объём корпуса (события/пользователи/дни)
+     GET  /api/datasets           — переключатель корпусов
+     GET  /api/incidents          — очередь триажа (sorted score desc)
+     GET  /api/incidents/:id      — деталь: граф / факторы / SHAP / плейбук
+     POST /api/report/:id         — черновик инцидент-отчёта (mock или Claude)
+     GET  /api/metrics?threshold= — валидация: confusion-matrix / precision / recall
+     POST /api/ingest             — загрузка лога CSV/JSON → движок → новый корпус
+   Якорь: утечка 16,3 млн записей РК (июнь 2025) — инсайдер с авторизованным
+   доступом; периметровый DLP/SIEM такое не ловит, UEBA — по отклонению от baseline.
+   ВСЕ ДАННЫЕ СИНТЕТИЧЕСКИЕ / пользовательские. ИИН/ФИО/IP в seed-корпусе вымышлены.
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   API-СЛОЙ — тонкие fetch-хелперы (заменили inline-массив CASES + analyze())
+   --------------------------------------------------------------------- */
+const API_BASE = ''; // same-origin (Express отдаёт public/ и /api/* с одного хоста)
+
+async function apiGet(path) {
+  const r = await fetch(API_BASE + path, { headers: { 'accept': 'application/json' } });
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).error || ''; } catch (_) { detail = await r.text().catch(()=>'')+''; }
+    throw new Error(`${r.status} ${path}${detail ? ' · ' + detail : ''}`);
+  }
+  return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(API_BASE + path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'accept': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) {
+    let detail = '';
+    try { detail = (await r.json()).error || ''; } catch (_) { detail = await r.text().catch(()=>'')+''; }
+    throw new Error(`${r.status} ${path}${detail ? ' · ' + detail : ''}`);
+  }
+  return r.json();
+}
+// загрузка файла с прогрессом upload (XHR — fetch не даёт upload-прогресс)
+function apiUpload(path, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', API_BASE + path);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      let j = null; try { j = JSON.parse(xhr.responseText); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(j || {});
+      else reject(new Error((j && j.error) || `Загрузка не удалась (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error('Сетевая ошибка при загрузке'));
+    xhr.send(formData);
+  });
+}
+
+/* ---------------------------------------------------------------------
+   АДАПТЕР ОТВЕТА API → форма {cs, res}, которую ждут GraphView / Detail.
+   Это позволяет ПЕРЕИСПОЛЬЗОВАТЬ компоненты мокапа БЕЗ переписывания их нутра:
+   - GraphView читает res.nodes (map по id) + cs.events (рёбра) + cs.hub + res.graphStats.cycle
+   - API шлёт graph.nodes[] (с onPath/isHub/kind) + graph.edges[] (from/to/action/rows/ts) + graph.cycle
+   Здесь восстанавливаем ровно те поля, на которые опирается layout/scrubber мокапа.
+   --------------------------------------------------------------------- */
+function adaptIncidentDetail(d) {
+  const g = d.graph || { nodes: [], edges: [], cycle: null, hub: null };
+  // res.nodes — map id→{id,kind,label,...}; GraphView ждёт .kind для layout (host/resource/user)
+  const nodes = {};
+  (g.nodes || []).forEach(n => {
+    nodes[n.id] = {
+      id: n.id, kind: n.kind, label: n.label || n.id,
+      sensitivity: n.sensitivity, zone: n.zone,
+      tags: n.tags || [],
+      inRows: n.inRows || 0, outRows: n.outRows || 0,
+      onPath: !!n.onPath, isHub: !!n.isHub,
+    };
+  });
+  // cs.events — рёбра графа в форме мокапа (from/to/action/rows/ts/channel/...)
+  const events = (g.edges || []).map((e, i) => ({
+    id: e.id || ('E' + i),
+    from: e.from, to: e.to,
+    user: d.user, role: d.role,
+    resource: e.to, db: e.db || '', host: e.host || '',
+    ip: e.ip || '', geo: e.geo || '',
+    action: e.action, rows: e.rows || 0, ts: e.ts || '',
+    channel: e.channel || '',
+  }));
+  const hub = g.hub || (d.graph && d.graph.hub) || (Object.values(nodes).find(n=>n.isHub)||{}).id || d.user;
+
+  // «cs» — то, что компонент Detail/GraphView ждёт от старого кейса
+  const cs = {
+    id: d.id, typology: d.typology, title: d.title, channel: d.channel,
+    facts: d.facts || '', hub, events,
+    windowDate: d.windowDate,
+    user: d.user, role: d.role,
+    related: d.related || [],
+    playbook: d.playbook || [],
+    label: d.label || null,
+  };
+  // «res» — то, что ждёт ScoreRing / Factor / GraphView
+  const res = {
+    score: d.score,
+    priority: d.priority,
+    triggers: d.triggers || [],
+    shap: d.shap || [],
+    mitigation: d.mitigation || null,
+    nodes,
+    graphStats: {
+      nodes: (g.nodes || []).length,
+      edges: (g.edges || []).length,
+      totalRows: (g.edges || []).reduce((s, e) => s + (e.rows || 0), 0),
+      hubId: hub,
+      cycle: g.cycle || null, // путь бокового перемещения (GraphView переиспользует это поле)
+    },
+    baseline: d.baseline || null,
+    observed: d.observed || null,
+  };
+  return { cs, res };
+}
+
+function fmt(n) { return new Intl.NumberFormat('ru-RU').format(Math.round(n || 0)); }
+// час из ts "YYYY-MM-DD HH:MM" или ISO "YYYY-MM-DDTHH:MM"
+function hourOf(ts) { return parseInt((ts || '').slice(11, 13), 10) || 0; }
+
+/* ---------------------------------------------------------------------
+   ГРАФ-ВИЗУАЛИЗАЦИЯ (SVG, без внешних либ) — layout по ролям узлов.
+   ПОРТИРОВАНА ИЗ МОКАПА БЕЗ ИЗМЕНЕНИЙ ЛОГИКИ: hop-scrubber, Play, drawEdge,
+   слоистый/линейный layout, node-pop. Теперь питается данными из API (через адаптер).
+   --------------------------------------------------------------------- */
+const REL_LABEL = {
+  SELECT:'читал', EXPORT:'выгрузил', DOWNLOAD:'скачал', LOGIN:'вошёл с',
+  GRANT:'получил права', SUDO:'эскалировал', ROLE_CHANGE:'сменил роль',
+};
+function NodeGlyph({ kind, color, s }) {
+  const sw = 1.7;
+  if (kind === 'resource') {
+    return (<g stroke={color} strokeWidth={sw} fill="none" strokeLinecap="round" strokeLinejoin="round" transform={`scale(${s})`} style={{transformBox:'fill-box', transformOrigin:'center'}}>
+      <ellipse cx="0" cy="-4.2" rx="6" ry="2.4" />
+      <path d="M-6 -4.2 V4.2 a6 2.4 0 0 0 12 0 V-4.2" />
+      <path d="M-6 0 a6 2.4 0 0 0 12 0" />
+    </g>);
+  }
+  if (kind === 'host') {
+    return (<g stroke={color} strokeWidth={sw} fill="none" strokeLinecap="round" strokeLinejoin="round" transform={`scale(${s})`} style={{transformBox:'fill-box', transformOrigin:'center'}}>
+      <rect x="-6" y="-5.5" width="12" height="5" rx="1.2" />
+      <rect x="-6" y="0.5" width="12" height="5" rx="1.2" />
+      <circle cx="-3.2" cy="-3" r="0.7" fill={color} stroke="none" />
+      <circle cx="-3.2" cy="3" r="0.7" fill={color} stroke="none" />
+    </g>);
+  }
+  return (<g stroke={color} strokeWidth={sw} fill="none" strokeLinecap="round" strokeLinejoin="round" transform={`scale(${s})`} style={{transformBox:'fill-box', transformOrigin:'center'}}>
+    <circle cx="0" cy="-3" r="3" />
+    <path d="M-5.5 6 a5.5 5 0 0 1 11 0" />
+  </g>);
+}
+
+function GraphView({ cs, res }) {
+  const W = 720, H = 460;
+  const nodes = res.nodes;
+  const ids = Object.keys(nodes);
+  const hub = cs.hub;
+
+  // --- РЁБРА критического пути (горящего): cycle для lateral, иначе все рёбра хаба к ресурсам ---
+  const critEdgeSet = new Set();
+  const critNodeSet = new Set([hub]);
+  if (res.graphStats.cycle) {
+    const c = res.graphStats.cycle;
+    for (let i=0;i<c.length-1;i++){ critEdgeSet.add(c[i]+'>'+c[i+1]); critNodeSet.add(c[i]); critNodeSet.add(c[i+1]); }
+  } else {
+    cs.events.forEach(t => { if (t.from===hub || t.to===hub){ critEdgeSet.add(t.from+'>'+t.to); critNodeSet.add(t.from); critNodeSet.add(t.to); } });
+  }
+
+  /* ── ХРОНОЛОГИЯ ХОПОВ (для scrubber + Play) ── */
+  const hopEvents = useMemo(() => {
+    let evs;
+    if (res.graphStats.cycle) {
+      const c = res.graphStats.cycle;
+      const byEdge = {};
+      cs.events.forEach(t => { byEdge[t.from + '>' + t.to] = t; });
+      evs = [];
+      for (let i = 0; i < c.length - 1; i++) {
+        const e = byEdge[c[i] + '>' + c[i + 1]];
+        if (e && !evs.includes(e)) evs.push(e);
+      }
+      cs.events.forEach(t => { if (critEdgeSet.has(t.from + '>' + t.to) && !evs.includes(t)) evs.push(t); });
+    } else {
+      evs = cs.events.filter(t => critEdgeSet.has(t.from + '>' + t.to));
+      evs = [...evs].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    }
+    return evs;
+  }, [cs.id]);
+
+  const maxStep = hopEvents.length;
+  const [step, setStep] = useState(maxStep);
+  const [playing, setPlaying] = useState(false);
+  useEffect(() => { setStep(maxStep); setPlaying(false); }, [cs.id, maxStep]);
+  useEffect(() => {
+    if (!playing) return;
+    if (step >= maxStep) { setPlaying(false); return; }
+    const t = setTimeout(() => setStep(s => Math.min(maxStep, s + 1)), 520);
+    return () => clearTimeout(t);
+  }, [playing, step, maxStep]);
+  const onPlay = () => {
+    if (step >= maxStep) { setStep(0); setPlaying(true); }
+    else setPlaying(true);
+  };
+  const onPause = () => setPlaying(false);
+  const onReset = () => { setPlaying(false); setStep(maxStep); };
+
+  const shownHops = hopEvents.slice(0, step);
+  const shownCritEdgeSet = new Set(shownHops.map(e => e.from + '>' + e.to));
+  const shownCritNodeSet = new Set([hub]);
+  shownHops.forEach(e => { shownCritNodeSet.add(e.from); shownCritNodeSet.add(e.to); });
+  const curHop = step > 0 ? hopEvents[step - 1] : null;
+
+  // --- LAYOUT по слоям: вход → пользователь → хост(ы) → ресурс ---
+  const positions = {};
+  const colX = [70, 235, 400, 555, 655];
+  const isHostId = (id) => (nodes[id]||{}).kind === 'host';
+  const isResId  = (id) => (nodes[id]||{}).kind === 'resource';
+
+  if (res.graphStats.cycle) {
+    const chain = res.graphStats.cycle;
+    const inChain = new Set(chain);
+    const stp = (W - 120) / Math.max(1, chain.length - 1);
+    chain.forEach((id, i) => { positions[id] = { x: 60 + stp*i, y: H*0.42 }; });
+    if (!inChain.has(hub)) positions[hub] = { x: 60, y: H*0.42 - 80 };
+    const rest = ids.filter(id => !positions[id]);
+    rest.forEach((id,i)=> positions[id] = { x: 90 + i*((W-160)/Math.max(1,rest.length)), y: H-70 });
+  } else {
+    positions[hub] = { x: colX[1], y: H/2 };
+    const hostIds = ids.filter(id => id!==hub && isHostId(id));
+    const resIds  = ids.filter(id => id!==hub && isResId(id));
+    const otherUsers = ids.filter(id => id!==hub && (nodes[id]||{}).kind==='user');
+    const place = (arr, x, yPad=50) => {
+      const n = arr.length; const cols = n > 7 ? 2 : 1; const perCol = Math.ceil(n/cols);
+      arr.forEach((id,i)=>{
+        const col = Math.floor(i/perCol), row = i%perCol;
+        const rn = Math.min(perCol, n - col*perCol);
+        const g = (H - 2*yPad)/Math.max(1, rn);
+        positions[id] = { x: x + col*52, y: yPad + g*row + g/2 };
+      });
+    };
+    place(hostIds, colX[2]);
+    place(resIds, colX[3] + (hostIds.length?40:0));
+    otherUsers.forEach((id,i)=> positions[id] = { x: colX[0], y: 80 + i*70 });
+    if (resIds.length && !hostIds.length) { place(resIds, colX[3]); }
+  }
+  ids.forEach(id => { if(!positions[id]) positions[id] = { x: 60+Math.random()*(W-120), y: 60+Math.random()*(H-120) }; });
+
+  const NEUTRAL = '#6A6B6C';
+  const colorFor = (id) => {
+    if (!critNodeSet.has(id)) return NEUTRAL;
+    const n = nodes[id];
+    if (id === hub) return '#FF6161';
+    if (n.kind === 'resource') return '#FF6161';
+    if (n.kind === 'host') return '#FFC533';
+    return '#57C1FF';
+  };
+  const radiusFor = (id) => {
+    const onPath = critNodeSet.has(id);
+    if (id === hub) return 24;
+    if (isResId(id)) return onPath ? 20 : 12;
+    if (isHostId(id)) return onPath ? 16 : 11;
+    return onPath ? 15 : 11;
+  };
+  const curve = (a, b, bend) => {
+    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    const dx=b.x-a.x, dy=b.y-a.y, len=Math.hypot(dx,dy)||1;
+    const nx=-dy/len, ny=dx/len;
+    return `M ${a.x} ${a.y} Q ${mx+nx*bend} ${my+ny*bend} ${b.x} ${b.y}`;
+  };
+
+  const cnt = { user:0, host:0, resource:0 };
+  ids.forEach(id => { const k=(nodes[id]||{}).kind; if(cnt[k]!==undefined) cnt[k]++; });
+
+  return (
+    <div>
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded-lg" style={{background:'#0D0D0D', border:'1px solid rgba(255,255,255,0.08)'}}>
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="#6A6B6C" />
+        </marker>
+        <marker id="arrC" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#FF6161" />
+        </marker>
+        <linearGradient id="critEdge" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#FFC533"/>
+          <stop offset="100%" stopColor="#FF6161"/>
+        </linearGradient>
+      </defs>
+
+      {cs.events.filter(t=>!critEdgeSet.has(t.from+'>'+t.to)).map((t,i)=>{
+        const a=positions[t.from], b=positions[t.to]; if(!a||!b) return null;
+        const bend = ((i%2)?1:-1) * (14 + (i%3)*6);
+        return <path key={'c'+i} d={curve(a,b,bend)} fill="none" stroke="#2A2A2B" strokeWidth="1.3" markerEnd="url(#arr)" opacity="0.7"/>;
+      })}
+      {cs.events.filter(t=>critEdgeSet.has(t.from+'>'+t.to)).map((t,i)=>{
+        const a=positions[t.from], b=positions[t.to]; if(!a||!b) return null;
+        const visible = shownCritEdgeSet.has(t.from+'>'+t.to);
+        if (!visible) return null;
+        const bend = ((i%2)?1:-1) * 16;
+        const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+        const dx=b.x-a.x, dy=b.y-a.y, len=Math.hypot(dx,dy)||1;
+        const nx=-dy/len, ny=dx/len;
+        const lx=mx+nx*(bend+ (bend>0?9:-9)), ly=my+ny*(bend+(bend>0?9:-9));
+        const rel = REL_LABEL[t.action] || (t.action||'').toLowerCase();
+        const sub = t.rows ? `${fmt(t.rows)} строк` : '';
+        const pathLen = Math.hypot(dx,dy) + Math.abs(bend)*1.3 + 24;
+        const isLeading = curHop && t === curHop;
+        return (
+          <g key={'h'+i} className="crit-hop">
+            <path d={curve(a,b,bend)} fill="none" stroke="url(#critEdge)" strokeWidth="2.6" markerEnd="url(#arrC)" strokeLinecap="round"
+              style={isLeading ? {
+                strokeDasharray: pathLen, strokeDashoffset: 0, '--len': pathLen,
+                animation: 'drawEdge .5s cubic-bezier(.25,.8,.3,1) both'
+              } : undefined}/>
+            <g style={isLeading ? { animation: 'hopLabel .42s ease-out .22s both' } : undefined}>
+              <text x={lx} y={ly-2} textAnchor="middle" fill="#F4F4F6" fontSize="11.5" fontFamily="Inter, sans-serif" fontWeight="600"
+                style={{paintOrder:'stroke', stroke:'#0D0D0D', strokeWidth:'3.5px', strokeLinejoin:'round'}}>{rel}</text>
+              {sub && <text x={lx} y={ly+10} textAnchor="middle" fill="#FFC533" fontSize="10" fontFamily="'JetBrains Mono', monospace" fontWeight="600"
+                style={{paintOrder:'stroke', stroke:'#0D0D0D', strokeWidth:'3.5px', strokeLinejoin:'round'}}>{sub}</text>}
+            </g>
+          </g>
+        );
+      })}
+
+      {ids.map(id => {
+        const p=positions[id], n=nodes[id]; const isHub=id===hub;
+        const onPath=critNodeSet.has(id);
+        const revealed = onPath ? shownCritNodeSet.has(id) : true;
+        if (onPath && !revealed) return null;
+        const r=radiusFor(id), col=colorFor(id);
+        const op = onPath ? 1 : 0.5;
+        const isFresh = onPath && curHop && (id===curHop.from || id===curHop.to) && !isHub;
+        return (
+          <g key={id} opacity={op} className={isFresh ? 'node-pop' : undefined}>
+            {isHub && (
+              <circle cx={p.x} cy={p.y} r={r+8} fill="none" stroke="#FF6161" strokeWidth="1.3" opacity="0.4">
+                <animate attributeName="r" values={`${r+5};${r+14};${r+5}`} dur="2.4s" repeatCount="indefinite"/>
+                <animate attributeName="opacity" values="0.45;0;0.45" dur="2.4s" repeatCount="indefinite"/>
+              </circle>
+            )}
+            <circle cx={p.x} cy={p.y} r={r} fill={onPath ? col+'1f' : '#161616'} stroke={col} strokeWidth={isHub?2.4:1.8}/>
+            <g transform={`translate(${p.x},${p.y})`}>
+              <NodeGlyph kind={n.kind} color={col} s={r/13} />
+            </g>
+            <text x={p.x} y={p.y + r + 13} textAnchor="middle" fill={onPath?'#F4F4F6':'#6A6B6C'}
+              fontSize={onPath?12:11} fontFamily="'JetBrains Mono', monospace" fontWeight={onPath?700:500}
+              style={{paintOrder:'stroke', stroke:'#0D0D0D', strokeWidth:'3px', strokeLinejoin:'round'}}>{id}</text>
+          </g>
+        );
+      })}
+    </svg>
+
+    {maxStep > 0 && (
+      <div className="mt-4 rounded-lg px-4 py-3.5" style={{background:'#101111', border:'1px solid rgba(255,255,255,0.08)'}}>
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {playing
+              ? <button onClick={onPause} aria-label="Пауза"
+                  className="flex items-center justify-center w-8 h-8 rounded-lg transition hover:brightness-110"
+                  style={{background:'#FFC533', color:'#07080A'}}>
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><rect x="1.5" y="1" width="3" height="10" rx="1"/><rect x="7.5" y="1" width="3" height="10" rx="1"/></svg>
+                </button>
+              : <button onClick={onPlay} aria-label="Воспроизвести"
+                  className="flex items-center justify-center w-8 h-8 rounded-lg transition hover:brightness-110"
+                  style={{background:'#57C1FF', color:'#07080A'}}>
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M2.5 1.4 10 6 2.5 10.6Z"/></svg>
+                </button>}
+            <button onClick={onReset} aria-label="Сброс (полный путь)" title="Сброс — показать полный путь"
+              className="flex items-center justify-center w-8 h-8 rounded-lg transition hover:brightness-125"
+              style={{background:'#1A1A1B', color:'#CDCDCD', border:'1px solid rgba(255,255,255,0.12)'}}>
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M11.5 5A5 5 0 1 0 12 8.2"/><path d="M11.8 2.2V5H9"/></svg>
+            </button>
+          </div>
+
+          <input type="range" min="0" max={maxStep} value={step}
+            onChange={e => { setPlaying(false); setStep(+e.target.value); }}
+            className="soc flex-1 min-w-[160px]" aria-label="Таймлайн хопов attack-path" />
+
+          <span className="font-mono text-[11px] shrink-0 tabular-nums" style={{color:'#57C1FF'}}>
+            хоп <span className="font-bold">{step}</span><span className="text-ink4">/{maxStep}</span>
+          </span>
+        </div>
+
+        <div className="mt-2.5 text-[12px] font-mono leading-snug min-h-[18px]" key={'lbl'+step}>
+          {curHop ? (
+            <span className="fade-in">
+              <span className="text-ink3">{(curHop.ts||'').slice(11,16)}</span>
+              <span className="text-ink5"> · </span>
+              <span className="text-ink1 font-semibold">{curHop.from}</span>
+              <span className="text-ink5"> → </span>
+              <span className="font-semibold" style={{color:'#FF6161'}}>{curHop.to}</span>
+              <span className="text-ink5"> · </span>
+              <span className="text-ink2">{REL_LABEL[curHop.action] || (curHop.action||'').toLowerCase()}</span>
+              {curHop.rows ? <span style={{color:'#FFC533'}}> {fmt(curHop.rows)} строк</span> : null}
+            </span>
+          ) : (
+            <span className="text-ink4">▸ Play — путь соберётся по событиям во времени · scrubber — вручную по шагам</span>
+          )}
+        </div>
+      </div>
+    )}
+
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-3 text-[11px]">
+      <span className="flex items-center gap-1.5 font-mono" style={{color:'#57C1FF'}}>
+        <svg width="13" height="13" viewBox="-8 -8 16 16"><NodeGlyph kind="user" color="#57C1FF" s={0.85}/></svg>
+        <span className="font-bold mono-num">{cnt.user}</span><span className="text-ink3">польз.</span>
+      </span>
+      <span className="flex items-center gap-1.5 font-mono" style={{color:'#FFC533'}}>
+        <svg width="13" height="13" viewBox="-8 -8 16 16"><NodeGlyph kind="host" color="#FFC533" s={0.85}/></svg>
+        <span className="font-bold mono-num">{cnt.host}</span><span className="text-ink3">хостов</span>
+      </span>
+      <span className="flex items-center gap-1.5 font-mono" style={{color:'#FF6161'}}>
+        <svg width="13" height="13" viewBox="-8 -8 16 16"><NodeGlyph kind="resource" color="#FF6161" s={0.85}/></svg>
+        <span className="font-bold mono-num">{cnt.resource}</span><span className="text-ink3">ресурсов (БД ПДн)</span>
+      </span>
+      <span className="flex items-center gap-1.5 font-mono text-ink3">
+        <span className="mono-num font-bold text-ink2">{cs.events.length}</span> доступов
+      </span>
+      <span className="ml-auto flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wide" style={{color:'#FF6161'}}>
+        <span className="inline-block w-5 h-[3px] rounded-full" style={{background:'linear-gradient(90deg,#FFC533,#FF6161)'}}></span>
+        горящий attack-path
+      </span>
+    </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   КОМПОНЕНТЫ UI (status-light system) — портированы из мокапа без изменений
+   --------------------------------------------------------------------- */
+const SEV = { crit:'#FF6161', bad:'#FF6161', warn:'#FFC533', high:'#FFC533', good:'#59D499' };
+const SEV_LABEL = { crit:'CRITICAL', bad:'HIGH', warn:'MEDIUM', high:'HIGH', good:'LOW' };
+
+function ScoreRing({ score, color }) {
+  const R = 46, C = 2*Math.PI*R, SZ = 124, CT = SZ/2;
+  const off = C * (1 - score/100);
+  const col = SEV[color] || '#38bdf8';
+  return (
+    <div className="relative" style={{width:SZ,height:SZ}}>
+      <svg width={SZ} height={SZ} className="-rotate-90">
+        <defs>
+          <linearGradient id={`ring-${color}`} x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor={col} stopOpacity="0.55"/>
+            <stop offset="100%" stopColor={col} stopOpacity="1"/>
+          </linearGradient>
+        </defs>
+        <circle cx={CT} cy={CT} r={R} stroke="rgba(255,255,255,0.08)" strokeWidth="9" fill="none"/>
+        <circle cx={CT} cy={CT} r={R} stroke={`url(#ring-${color})`} strokeWidth="9" fill="none"
+          strokeDasharray={C} strokeDashoffset={off} strokeLinecap="round"
+          style={{transition:'stroke-dashoffset .7s ease-out'}}/>
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-[36px] font-extrabold leading-none tracking-tightest kpi-tick" style={{color:col}}>{score}</span>
+        <span className="text-[9px] uppercase tracking-[0.18em] text-ink4 mt-1">/ 100 RISK</span>
+      </div>
+    </div>
+  );
+}
+
+function Tag({ children, sev='warn' }) {
+  const c = SEV[sev];
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] leading-none px-1.5 py-1 rounded-md font-mono font-semibold uppercase tracking-wide"
+      style={{background:c+'1a', color:c, border:'1px solid '+c+'40'}}>
+      <span className="w-1 h-1 rounded-full" style={{background:c, boxShadow:`0 0 5px ${c}`}}></span>
+      {children}
+    </span>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   NEW: состояния загрузки / ошибки — данные теперь сетевые
+   --------------------------------------------------------------------- */
+function QueueSkeleton() {
+  return (
+    <div className="fade-in">
+      {Array.from({length:6}).map((_,i)=>(
+        <div key={i} className="flex items-center gap-5 py-5 border-b border-edge/60 px-4 -mx-4">
+          <span className="flex items-center gap-3.5 shrink-0 w-[88px]">
+            <span className="w-[3px] h-9 rounded-full skel"></span>
+            <span className="skel h-7 w-10"></span>
+          </span>
+          <span className="flex-1 min-w-0">
+            <span className="block skel h-4 w-3/4 mb-2"></span>
+            <span className="block skel h-3 w-1/3"></span>
+          </span>
+          <span className="hidden md:block skel h-5 w-16"></span>
+        </div>
+      ))}
+    </div>
+  );
+}
+function DetailSkeleton() {
+  return (
+    <div className="fade-in">
+      <div className="skel h-3 w-20 mb-7"></div>
+      <div className="flex items-start justify-between gap-8 flex-wrap mb-12">
+        <div className="flex-1 min-w-[300px]">
+          <div className="skel h-4 w-40 mb-4"></div>
+          <div className="skel h-7 w-3/4 mb-3"></div>
+          <div className="skel h-3 w-1/2"></div>
+        </div>
+        <div className="skel rounded-full" style={{width:124,height:124}}></div>
+      </div>
+      <div className="skel w-full mb-12" style={{height:300,borderRadius:12}}></div>
+      <div className="space-y-7 max-w-[760px]">
+        {Array.from({length:3}).map((_,i)=><div key={i} className="skel h-12 w-full"></div>)}
+      </div>
+    </div>
+  );
+}
+function ErrorPane({ message, onRetry }) {
+  return (
+    <div className="fade-in max-w-[640px] mx-auto text-center py-20">
+      <div className="text-[13px] font-mono mb-4 flex items-center justify-center gap-2" style={{color:'#FF6161'}}>
+        <span className="w-2 h-2 rounded-full beacon" style={{background:'#FF6161', color:'#FF6161'}}></span>
+        Не удалось получить данные с сервера
+      </div>
+      <p className="text-[12px] text-ink4 font-mono leading-relaxed mb-2 break-words">{message}</p>
+      <p className="text-[11px] text-ink5 leading-relaxed mb-6">
+        Сервис запускается командой <span className="font-mono text-ink3">npm run seed && npm start</span> → бэкенд на <span className="font-mono text-ink3">:3000</span> отдаёт этот фронт и <span className="font-mono text-ink3">/api/*</span>.
+      </p>
+      {onRetry && (
+        <button onClick={onRetry}
+          className="text-[12px] font-semibold rounded-lg px-4 py-2 transition hover:brightness-110"
+          style={{background:'#57C1FF', color:'#07080A'}}>Повторить</button>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   NEW: ЭКРАН ЗАГРУЗКИ ЛОГА — drag-drop CSV/JSON → POST /api/ingest →
+   прогресс → движок считает baseline → авто-активация → прыжок в очередь.
+   Это ключевой «не мокап» момент: сервис жуёт РЕАЛЬНЫЕ данные пользователя.
+   --------------------------------------------------------------------- */
+function UploadScreen({ onIngested, datasets, onActivate, activeId }) {
+  const [over, setOver] = useState(false);
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null); // {format, lines[]}
+  const [phase, setPhase] = useState('idle');    // idle | uploading | analyzing | done | error
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  const inputRef = useRef(null);
+
+  const detectFormat = (name, head) => {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    if (ext === 'csv') return 'CSV';
+    if (ext === 'jsonl' || ext === 'ndjson') return 'JSON-lines';
+    if (ext === 'json') return head.trim().startsWith('[') ? 'JSON-array' : 'JSON-lines';
+    // sniff
+    const t = head.trim();
+    if (t.startsWith('[') || t.startsWith('{')) return t.startsWith('[') ? 'JSON-array' : 'JSON-lines';
+    return 'CSV';
+  };
+
+  const onFile = (f) => {
+    if (!f) return;
+    setFile(f); setError(''); setPhase('idle'); setResult(null); setProgress(0);
+    // читаем первые ~5 строк ТОЛЬКО для превью (не для анализа — анализ на сервере)
+    const reader = new FileReader();
+    reader.onload = () => {
+      const head = (reader.result || '').slice(0, 4000);
+      const lines = head.split(/\r?\n/).filter(Boolean).slice(0, 5);
+      setPreview({ format: detectFormat(f.name, head), lines });
+    };
+    reader.readAsText(f.slice(0, 8000));
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault(); setOver(false);
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    onFile(f);
+  };
+
+  const upload = async () => {
+    if (!file) return;
+    setError(''); setProgress(0); setPhase('uploading');
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('name', file.name);
+    try {
+      // 100% upload → переходим в «движок считает»
+      const res = await apiUpload('/api/ingest', fd, (p) => {
+        setProgress(p);
+        if (p >= 100) setPhase('analyzing');
+      });
+      setPhase('done'); setResult(res);
+      // авто-активация нового корпуса + прыжок в очередь
+      if (res && res.datasetId) onIngested(res.datasetId, res);
+    } catch (e) {
+      setError(e.message || 'Ошибка загрузки'); setPhase('error');
+    }
+  };
+
+  const busy = phase === 'uploading' || phase === 'analyzing';
+
+  return (
+    <div className="max-w-[860px] mx-auto w-full fade-in">
+      <div className="mb-8">
+        <h2 className="text-[24px] font-extrabold tracking-tightest text-ink1">Загрузить журнал доступа</h2>
+        <p className="text-[13px] text-ink4 mt-2 max-w-[680px] leading-relaxed">
+          Перетащите свой лог (<span className="font-mono text-ink3">.csv</span> / <span className="font-mono text-ink3">.jsonl</span> / <span className="font-mono text-ink3">.json</span>) — движок UEBA построит baseline
+          из истории <span className="text-ink2">каждого</span> пользователя в нём и найдёт аномалии. Это не демо на 9 кейсах: сервис обрабатывает
+          произвольный массив событий любого размера.
+        </p>
+      </div>
+
+      {/* DROPZONE */}
+      <div
+        onDragOver={e=>{e.preventDefault(); setOver(true);}}
+        onDragLeave={()=>setOver(false)}
+        onDrop={handleDrop}
+        onClick={()=> !busy && inputRef.current && inputRef.current.click()}
+        className={`dropzone ${over?'over':''} rounded-xl px-8 py-14 text-center cursor-pointer`}>
+        <input ref={inputRef} type="file" accept=".csv,.jsonl,.ndjson,.json" className="hidden"
+          onChange={e=> onFile(e.target.files && e.target.files[0])} />
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" className="mx-auto mb-4" style={{opacity:0.7}}>
+          <path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke="#57C1FF" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="#6A6B6C" strokeWidth="1.6" strokeLinecap="round"/>
+        </svg>
+        <p className="text-[14px] text-ink2 font-medium">Перетащите файл сюда <span className="text-ink4">или нажмите для выбора</span></p>
+        <p className="text-[11px] text-ink4 font-mono mt-2">CSV с заголовком · JSON-lines · JSON-array</p>
+      </div>
+
+      {/* FILE + PREVIEW */}
+      {file && (
+        <div className="mt-6 rounded-xl p-5 panel-card border border-edge fade-in">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="font-mono text-[13px] text-ink1 truncate">{file.name}</span>
+              {preview && <Tag sev="good">{preview.format}</Tag>}
+              <span className="text-[11px] text-ink4 font-mono">{(file.size/1024).toFixed(1)} КБ</span>
+            </div>
+            {!busy && phase!=='done' && (
+              <button onClick={upload}
+                className="text-[12px] font-semibold rounded-lg px-4 py-2 transition hover:brightness-110"
+                style={{background:'#57C1FF', color:'#07080A'}}>▸ Проанализировать движком</button>
+            )}
+          </div>
+
+          {preview && preview.lines.length > 0 && phase==='idle' && (
+            <pre className="mt-4 text-[10.5px] text-ink3 whitespace-pre-wrap leading-relaxed bg-panel rounded-lg p-3 border border-edge font-mono overflow-x-auto">
+{preview.lines.join('\n')}
+            </pre>
+          )}
+
+          {/* ПРОГРЕСС загрузки */}
+          {phase==='uploading' && (
+            <div className="mt-5 fade-in">
+              <div className="flex items-center justify-between text-[11px] font-mono mb-2">
+                <span className="text-ink3">Загрузка лога…</span>
+                <span style={{color:'#57C1FF'}}>{progress}%</span>
+              </div>
+              <div className="h-[6px] rounded-full overflow-hidden" style={{background:'rgba(255,255,255,0.06)'}}>
+                <div className="h-full rounded-full" style={{width:`${progress}%`, background:'#57C1FF', transition:'width .2s'}}></div>
+              </div>
+            </div>
+          )}
+
+          {/* ДВИЖОК СЧИТАЕТ baseline — индетерминантно */}
+          {phase==='analyzing' && (
+            <div className="mt-5 fade-in">
+              <div className="flex items-center gap-2.5 text-[12px] font-mono mb-2.5" style={{color:'#FFC533'}}>
+                <svg className="spin" width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M12 2a10 10 0 1 0 10 10" stroke="#FFC533" strokeWidth="3" strokeLinecap="round"/></svg>
+                Движок считает baseline по истории пользователей и ищет аномалии…
+              </div>
+              <div className="indet h-[6px]"></div>
+            </div>
+          )}
+
+          {/* ОШИБКА */}
+          {phase==='error' && (
+            <div className="mt-5 text-[12px] font-mono leading-relaxed fade-in" style={{color:'#FF6161'}}>
+              <span className="font-semibold">Ошибка:</span> {error}
+              <p className="text-[11px] text-ink4 mt-2">Проверьте формат: нужны поля <span className="text-ink3">user, resource, action, ts</span> (rows по умолчанию 0).</p>
+            </div>
+          )}
+
+          {/* ГОТОВО */}
+          {phase==='done' && result && (
+            <div className="mt-5 fade-in">
+              <div className="flex items-center gap-2.5 text-[12.5px] font-mono mb-3" style={{color:'#59D499'}}>
+                <span className="w-2 h-2 rounded-full" style={{background:'#59D499'}}></span>
+                Проанализировано <span className="font-bold">{fmt(result.eventCount)}</span> событий
+                {typeof result.durationMs==='number' ? <span className="text-ink4"> за {fmt(result.durationMs)} мс</span> : null}
+              </div>
+              <div className="flex flex-wrap gap-x-8 gap-y-3 text-[12px] font-mono">
+                <span className="text-ink3">пользователей <span className="text-ink1 font-bold">{fmt(result.userCount)}</span></span>
+                <span className="text-ink3">дней <span className="text-ink1 font-bold">{fmt(result.dayCount)}</span></span>
+                <span className="text-ink3">ресурсов <span className="text-ink1 font-bold">{fmt(result.resourceCount)}</span></span>
+                <span className="text-ink3">инцидентов <span style={{color:'#FF6161'}} className="font-bold">{fmt(result.incidentCount)}</span></span>
+              </div>
+              {result.summary && (
+                <div className="flex flex-wrap gap-x-6 gap-y-2 text-[11px] font-mono mt-3">
+                  <span style={{color:SEV.crit}}>● {result.summary.critical} крит.</span>
+                  <span style={{color:SEV.bad}}>● {result.summary.high} высок.</span>
+                  <span style={{color:SEV.warn}}>● {result.summary.medium} сред.</span>
+                  <span style={{color:SEV.good}}>● {result.summary.low} низк.</span>
+                </div>
+              )}
+              <p className="text-[11px] text-ink4 mt-4">Корпус активирован — открываю очередь с реальными инцидентами из вашего лога…</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ФОРМАТ INGEST — подсказка жюри */}
+      <div className="mt-10 max-w-[680px]">
+        <h3 className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold mb-3">Формат события (канон)</h3>
+        <pre className="text-[10.5px] text-ink3 whitespace-pre-wrap leading-relaxed bg-panel rounded-lg p-4 border border-edge font-mono overflow-x-auto">{
+`CSV-заголовок:
+user,role,resource,db,host,ip,geo,action,rows,ts,channel
+
+JSON-lines (по объекту на строку):
+{"user":"analyst_3","role":"analyst","resource":"DB-PERSONS","action":"SELECT","rows":80000,"ts":"2026-06-12T02:14:00","channel":"db"}
+
+обязательные: user · resource · action · ts   ·   rows по умолчанию 0   ·   ts приводится к ISO
+действия: LOGIN / SELECT / EXPORT / DOWNLOAD / GRANT / SUDO / ROLE_CHANGE`
+}</pre>
+        <p className="text-[11px] text-ink4 mt-3 leading-relaxed">
+          Если лог содержит колонку <span className="font-mono text-ink3">label</span> (ground-truth) — экран «Валидация» покажет precision / recall / AUPRC.
+          Без меток — только распределение score и объёмные статистики.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   ПЕРЕКЛЮЧАТЕЛЬ КОРПУСОВ (dataset switcher) — seed / загруженные логи
+   --------------------------------------------------------------------- */
+function DatasetSwitcher({ datasets, activeId, onActivate }) {
+  const [open, setOpen] = useState(false);
+  const active = datasets.find(d => d.id === activeId) || datasets[0];
+  if (!active) return null;
+  return (
+    <div className="relative">
+      <button onClick={()=>setOpen(o=>!o)}
+        className="flex items-center gap-2 text-[11px] font-mono rounded-lg px-3 py-1.5 transition hover:brightness-125"
+        style={{background:'#1A1A1B', color:'#CDCDCD', border:'1px solid rgba(255,255,255,0.12)'}}>
+        <span className="w-1.5 h-1.5 rounded-full" style={{background: active.source==='seed'?'#57C1FF':'#59D499'}}></span>
+        <span className="text-ink1 font-semibold max-w-[160px] truncate">{active.name}</span>
+        <span className="text-ink4">{active.source==='seed'?'seed':'лог'}</span>
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" style={{transform: open?'rotate(180deg)':'none', transition:'transform .15s'}}>
+          <path d="M2 3.5L5 6.5L8 3.5" stroke="#9C9C9D" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-2 z-30 rounded-lg overflow-hidden fade-in min-w-[260px]"
+          style={{background:'#101111', border:'1px solid rgba(255,255,255,0.16)'}}>
+          {datasets.map(d => (
+            <button key={d.id} onClick={()=>{ setOpen(false); if(d.id!==activeId) onActivate(d.id); }}
+              className={`w-full text-left px-3.5 py-2.5 transition hover:bg-panel3 flex items-center gap-2.5 ${d.id===activeId?'bg-panel3':''}`}>
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{background: d.source==='seed'?'#57C1FF':'#59D499'}}></span>
+              <span className="flex-1 min-w-0">
+                <span className="block text-[12px] text-ink1 font-medium truncate">{d.name}</span>
+                <span className="block text-[10px] text-ink4 font-mono mt-0.5">
+                  {fmt(d.eventCount)} соб. · {fmt(d.userCount)} польз. · {fmt(d.incidentCount)} инц.{d.hasGroundTruth?' · GT':''}
+                </span>
+              </span>
+              {d.id===activeId && <span className="text-[10px] font-mono shrink-0" style={{color:'#57C1FF'}}>активен</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   ВАЛИДАЦИЯ — what-if + confusion-matrix + метрики + сравнение с DLP.
+   Верстка портирована из мокапа; данные из GET /api/metrics?threshold=N.
+   --------------------------------------------------------------------- */
+function ConfCell({ label, val, color }) {
+  return (
+    <div className="text-center px-2">
+      <div className="font-mono font-extrabold text-[40px] leading-none kpi-tick" style={{ color }}>{val}</div>
+      <div className="text-[10.5px] uppercase tracking-wide text-ink4 leading-tight mt-2.5">{label}</div>
+    </div>
+  );
+}
+function ValMetric({ label, value, color, dim }) {
+  return (
+    <div className="text-center">
+      <div className="font-mono font-extrabold text-[34px] leading-none kpi-tick" style={{ color: dim ? '#6A6B6C' : color }}>{value}</div>
+      <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">{label}</div>
+    </div>
+  );
+}
+
+function Validation({ threshold, setThreshold, m, loading, error, onRetry, datasetName }) {
+  const pct = v => Math.round((v||0) * 100) + '%';
+
+  if (error) return <ErrorPane message={error} onRetry={onRetry} />;
+
+  if (loading || !m) {
+    return (
+      <div className="space-y-14 fade-in">
+        <div>
+          <h2 className="text-[24px] font-extrabold tracking-tightest text-ink1">Доказательство точности</h2>
+          <p className="text-[13px] text-ink4 mt-2">Считаем метрики на сервере…</p>
+        </div>
+        <div className="skel h-2 w-full"></div>
+        <div className="flex flex-wrap gap-x-14 gap-y-8">
+          {Array.from({length:4}).map((_,i)=><div key={i} className="skel h-14 w-24"></div>)}
+        </div>
+      </div>
+    );
+  }
+
+  // если в корпусе нет ground-truth — показываем объёмные статистики + распределение score
+  if (m.hasGroundTruth === false || (!m.confusion && !m.quality)) {
+    const dist = m.scoreDistribution || null;
+    return (
+      <div className="space-y-12 fade-in">
+        <div>
+          <h2 className="text-[24px] font-extrabold tracking-tightest text-ink1">Объём и распределение риска</h2>
+          <p className="text-[13px] text-ink4 mt-2 max-w-[680px] leading-relaxed">
+            {m.note || 'Загруженный лог без ground-truth — показаны объёмные статистики и распределение score (метрики качества требуют меток).'}
+          </p>
+        </div>
+        {m.corpus && (
+          <section>
+            <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Корпус «{datasetName}»</span>
+            <div className="flex flex-wrap items-start gap-x-14 gap-y-8 mt-7">
+              <ValMetric label="событий" value={fmt(m.corpus.eventCount)} color="#57C1FF" />
+              <ValMetric label="пользователей" value={fmt(m.corpus.userCount)} color="#57C1FF" />
+              <ValMetric label="user-дней" value={fmt(m.corpus.dayCount)} color="#57C1FF" />
+              <ValMetric label="инцидентов" value={fmt(m.corpus.total)} color="#FF6161" />
+            </div>
+          </section>
+        )}
+        <section>
+          <div className="flex items-center justify-between mb-5">
+            <span className="text-[12px] uppercase tracking-[0.14em] text-ink3 font-semibold">What-if · порог тревоги</span>
+            <span className="font-mono text-[15px] font-bold" style={{color:'#57C1FF'}}>score ≥ {threshold}</span>
+          </div>
+          <input type="range" min="0" max="100" value={threshold} onChange={e => setThreshold(+e.target.value)} className="soc w-full" />
+          <p className="text-[12.5px] text-ink3 mt-5 leading-relaxed">
+            Показано <span className="text-ink1 font-mono font-semibold">{m.quality ? m.quality.alertsShown : '—'}</span> инцидентов выше порога.
+          </p>
+        </section>
+      </div>
+    );
+  }
+
+  const c = m.confusion, q = m.quality, nv = m.naive;
+  const f1col = q.f1 >= 0.99 ? '#59D499' : q.f1 >= 0.8 ? '#FFC533' : '#FF6161';
+  const corpus = m.corpus || {};
+  return (
+    <div className="space-y-14 fade-in">
+      <div>
+        <h2 className="text-[24px] font-extrabold tracking-tightest text-ink1">Доказательство точности</h2>
+        <p className="text-[13px] text-ink4 mt-2 max-w-[640px] leading-relaxed">
+          Двигайте порог тревоги — метрики пересчитываются на сервере (<span className="font-mono">/api/metrics</span>) на том же корпусе и том же ground-truth.
+        </p>
+      </div>
+
+      {/* WHAT-IF */}
+      <section>
+        <div className="flex items-center justify-between mb-5">
+          <span className="text-[12px] uppercase tracking-[0.14em] text-ink3 font-semibold">What-if · порог тревоги</span>
+          <span className="font-mono text-[15px] font-bold" style={{color:'#57C1FF'}}>score ≥ {threshold}</span>
+        </div>
+        <input type="range" min="0" max="100" value={threshold} onChange={e => setThreshold(+e.target.value)} className="soc w-full" />
+        <div className="flex justify-between text-[10px] text-ink4 mt-2.5 font-mono">
+          <span>0 · всё в тревоги (FP↑)</span><span>55 · баланс</span><span>100 · молчим (FN↑)</span>
+        </div>
+        <p className="text-[12.5px] text-ink3 mt-5 leading-relaxed max-w-[760px]">
+          SOC-аналитику показано <span className="text-ink1 font-mono font-semibold">{q.alertsShown}</span> из {corpus.total} инцидентов — ниже порога подавлено, экономим время.
+          Ground-truth: <span className="text-ink1 font-mono">{corpus.illicit}</span> реальных угроз / <span className="text-ink1 font-mono">{corpus.benign}</span> легитимных (ETL-сервис, плановый аудит).
+          Корпус: <span className="text-ink1 font-mono">{fmt(corpus.eventCount)}</span> событий · <span className="text-ink1 font-mono">{fmt(corpus.userCount)}</span> польз. · <span className="text-ink1 font-mono">{fmt(corpus.dayCount)}</span> user-дней.
+        </p>
+      </section>
+
+      {/* CONFUSION MATRIX */}
+      <section>
+        <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Confusion matrix</span>
+        <div className="flex flex-wrap items-start gap-x-14 gap-y-8 mt-7">
+          <ConfCell label="поймано · TP" val={c.TP} color="#59D499" />
+          <ConfCell label="лож. тревог · FP" val={c.FP} color="#FF6161" />
+          <ConfCell label="пропуски · FN" val={c.FN} color="#FFC533" />
+          <ConfCell label="верно сняты · TN" val={c.TN} color="#57C1FF" />
+        </div>
+      </section>
+
+      {/* МЕТРИКИ КАЧЕСТВА */}
+      <section>
+        <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Качество детекта</span>
+        <div className="flex flex-wrap items-start gap-x-14 gap-y-8 mt-7">
+          <ValMetric label="Precision" value={pct(q.precision)} color={q.precision >= 0.99 ? '#59D499' : '#FFC533'} />
+          <ValMetric label="Recall" value={pct(q.recall)} color={q.recall >= 0.99 ? '#59D499' : '#FFC533'} />
+          <ValMetric label="F1" value={pct(q.f1)} color={f1col} />
+          <ValMetric label="AUPRC" value={(q.auprc!=null?q.auprc:0).toFixed(3)} color="#59D499" />
+          <ValMetric label={`Recall@top-${corpus.illicit}`} value={`${q.recallTopN}%`} color="#59D499" />
+          <ValMetric label="accuracy" value={pct(q.accuracy)} color="#6A6B6C" dim />
+        </div>
+        <p className="text-[12px] text-ink4 mt-7 leading-relaxed max-w-[760px] flex gap-2">
+          <span className="shrink-0" style={{color:'#FFC533'}}>⚠</span>
+          <span>Инсайдер-события редкие: классификатор-пустышка даёт ~99.9% accuracy и ловит ноль — поэтому метрика качества = AUPRC и recall@top-N, а не accuracy.</span>
+        </p>
+      </section>
+
+      {/* СРАВНЕНИЕ С НАИВНЫМ DLP */}
+      {nv && (
+        <section>
+          <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Против наивного периметрового DLP/SIEM</span>
+          <div className="flex flex-wrap items-start gap-x-16 gap-y-8 mt-7">
+            <div>
+              <div className="font-mono font-extrabold text-[34px] leading-none kpi-tick" style={{color:'#59D499'}}>
+                {nv.naiveFP} <span className="text-ink5 text-[22px]">→</span> {c.FP}
+              </div>
+              <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">ложных тревог{nv.reduction>0?` · −${nv.reduction}%`:''}</div>
+            </div>
+            <div>
+              <div className="font-mono font-extrabold text-[34px] leading-none kpi-tick" style={{color:'#59D499'}}>
+                {nv.naiveTP}/{corpus.illicit} <span className="text-ink5 text-[22px]">→</span> {c.TP}/{corpus.illicit}
+              </div>
+              <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">угроз поймано</div>
+            </div>
+          </div>
+          <p className="text-[12px] text-ink4 mt-7 leading-relaxed max-w-[760px]">
+            Грубое периметровое правило флагает легитимный крупнообъёмный ETL/аудит как ложную тревогу (нет персонального baseline) и пропускает тихих инсайдеров — боковое движение, эскалацию привилегий, компрометацию. UEBA ловит по отклонению от персональной нормы.
+          </p>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   ДЕТАЛЬ ИНЦИДЕНТА — граф / факторы / SHAP / baseline / плейбук / отчёт.
+   Данные из GET /api/incidents/:id (через адаптер) + POST /api/report/:id.
+   --------------------------------------------------------------------- */
+function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genSAR, onSelect, onBack }) {
+  const related = cs.related || [];
+  const pc = SEV[res.priority.color];
+  const [showAllFactors, setShowAllFactors] = useState(false);
+  const [showReport, setShowReport] = useState(false);
+  const topFactors = res.shap.slice(0, 3);
+  const restFactors = res.shap.slice(3);
+  const playbook = cs.playbook || [];
+
+  const Factor = ({ s }) => {
+    const sc = SEV[s.severity];
+    return (
+      <div className="fade-in">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <span className="flex items-center gap-2.5 min-w-0">
+            <Tag sev={s.severity}>{s.code}</Tag>
+            <span className="text-[13px] text-ink1 truncate">{s.label}</span>
+          </span>
+          <span className="font-mono font-extrabold text-[18px] leading-none kpi-tick shrink-0" style={{color:sc}}>+{s.contribution}</span>
+        </div>
+        <div className="w-full h-[5px] rounded-full overflow-hidden" style={{background:'rgba(255,255,255,0.06)'}}>
+          <div className="h-full rounded-full" style={{width:`${Math.min(100,s.contribution/Math.max(1,res.score)*100)}%`, background:sc, transition:'width .6s cubic-bezier(.2,.7,.3,1)'}}></div>
+        </div>
+        <p className="text-[11.5px] text-ink4 mt-2 leading-snug">{s.detail}</p>
+      </div>
+    );
+  };
+
+  return (
+    <div className="fade-in">
+      <button onClick={onBack} className="text-[12px] text-ink4 hover:text-ink2 transition mb-7 flex items-center gap-1.5">
+        <span className="text-[15px] leading-none">←</span> к очереди
+      </button>
+
+      {/* ЗАГОЛОВОК + score-ring */}
+      <div className="flex items-start justify-between gap-8 flex-wrap mb-12">
+        <div className="flex-1 min-w-[300px]">
+          <div className="flex items-center gap-2.5 mb-3 flex-wrap">
+            <span className="font-mono text-[12px] text-ink4">{cs.id}</span>
+            <Tag sev={res.priority.color}>{res.priority.lvl}</Tag>
+            {cs.label && (
+              <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-1 rounded-md"
+                style={{background:(cs.label.malicious?'#FF6161':'#59D499')+'1a', color:cs.label.malicious?'#FF6161':'#59D499', border:'1px solid '+(cs.label.malicious?'#FF6161':'#59D499')+'40'}}>
+                GT: {cs.label.malicious?'угроза':'легитимно'}
+              </span>
+            )}
+          </div>
+          <h2 className="text-[26px] font-extrabold tracking-tightest text-ink1 leading-tight">{cs.title}</h2>
+          <p className="text-[12px] text-ink4 mt-3 font-mono">
+            Источник сигнала · <span className="text-ink3">{cs.channel}</span>
+            {cs.windowDate && <span className="text-ink5"> · окно {cs.windowDate}</span>}
+            {cs.user && <span className="text-ink5"> · {cs.user}{cs.role?` (${cs.role})`:''}</span>}
+          </p>
+          <p className="text-[13px] mt-4 font-medium flex items-center gap-1.5" style={{color:pc}}>
+            <span>▸</span>{res.priority.note}
+          </p>
+        </div>
+        <div className="shrink-0">
+          <ScoreRing score={res.score} color={res.priority.color} />
+        </div>
+      </div>
+
+      {/* BASELINE — ключ к «не мокап»: baseline ВЫЧИСЛЕН из истории пользователя */}
+      {res.baseline && (
+        <section className="mb-12 max-w-[760px]">
+          <h3 className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold mb-4">Baseline пользователя · вычислен из истории</h3>
+          <div className="flex flex-wrap gap-x-10 gap-y-4 text-[12px] font-mono">
+            <span className="text-ink3">в среднем строк/день <span className="text-ink1 font-bold">{fmt(res.baseline.avg_rows_per_day)}</span></span>
+            {res.baseline.work_hours && <span className="text-ink3">рабочие часы <span className="text-ink1 font-bold">{res.baseline.work_hours[0]}:00–{res.baseline.work_hours[1]}:00</span></span>}
+            {typeof res.baseline.dayCountObserved==='number' && <span className="text-ink3">дней истории <span className="text-ink1 font-bold">{res.baseline.dayCountObserved}</span></span>}
+            {res.baseline.home_geo && <span className="text-ink3">домашнее гео <span className="text-ink1 font-bold">{res.baseline.home_geo}</span></span>}
+            {typeof res.baseline.established==='boolean' && <span className="text-ink3">профиль <span className="font-bold" style={{color:res.baseline.established?'#59D499':'#FFC533'}}>{res.baseline.established?'established':'cold-start'}</span></span>}
+          </div>
+          {res.observed && (
+            <div className="flex flex-wrap gap-x-10 gap-y-4 text-[12px] font-mono mt-3 pt-3 border-t border-edge/60">
+              <span className="text-ink4">в окне инцидента:</span>
+              <span className="text-ink3">прочитано <span style={{color:'#FF6161'}} className="font-bold">{fmt(res.observed.rowsTouched)}</span> строк</span>
+              {typeof res.observed.exportRows==='number' && res.observed.exportRows>0 && <span className="text-ink3">выгружено <span style={{color:'#FF6161'}} className="font-bold">{fmt(res.observed.exportRows)}</span></span>}
+              {res.observed.resources && <span className="text-ink3">ресурсов <span className="text-ink1 font-bold">{res.observed.resources.length}</span></span>}
+            </div>
+          )}
+          <p className="text-[11px] text-ink4 mt-3 leading-relaxed">
+            Baseline не задан вручную — он посчитан из прошлых дней самого пользователя (leave-one-day-out). Это и есть UEBA: аномалия меряется относительно персональной нормы, а не глобального порога.
+          </p>
+        </section>
+      )}
+
+      {/* ГЕРОЙ — граф attack-path */}
+      <section className="mb-12">
+        <div className="flex items-center gap-3 mb-5">
+          <h3 className="text-[15px] font-semibold text-ink1 tracking-tightest">Attack-path</h3>
+          {res.graphStats.cycle
+            ? <span className="text-[10px] font-mono uppercase tracking-wide" style={{color:'#FF6161'}}>● боковое перемещение</span>
+            : <span className="text-[10px] font-mono uppercase tracking-wide" style={{color:'#FFC533'}}>● путь к данным</span>}
+        </div>
+        <GraphView cs={cs} res={res} />
+      </section>
+
+      {/* ПОЧЕМУ ПОМЕЧЕНО — топ-3 + раскрытие */}
+      <section className="mb-12 max-w-[760px]">
+        <h3 className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold mb-6">Почему помечено</h3>
+        {res.shap.length === 0 && (
+          <div className="flex items-center gap-2.5 text-[13px]" style={{color:'#59D499'}}>
+            <span className="w-2 h-2 rounded-full" style={{background:'#59D499'}}></span>
+            Аномалий не выявлено — ложная тревога не сформирована.
+          </div>
+        )}
+        <div className="space-y-7">
+          {topFactors.map((s,i)=> <Factor key={i} s={s} />)}
+        </div>
+        {restFactors.length > 0 && (
+          <>
+            {showAllFactors && (
+              <div className="space-y-7 mt-7">
+                {restFactors.map((s,i)=> <Factor key={'r'+i} s={s} />)}
+              </div>
+            )}
+            <button onClick={()=> setShowAllFactors(v=>!v)}
+              className="text-[12px] text-ink4 hover:text-ink2 transition mt-7">
+              {showAllFactors ? '− свернуть факторы' : `+ показать все факторы (${restFactors.length})`}
+            </button>
+          </>
+        )}
+        {res.mitigation && (
+          <div className="mt-8 flex items-start gap-3 text-[12px] max-w-[640px]">
+            <span className="font-mono whitespace-nowrap font-bold uppercase tracking-wide text-[10.5px] mt-0.5" style={{color:'#59D499'}}>− контекст ×{res.mitigation.factor}</span>
+            <span className="text-ink3 leading-snug">{res.mitigation.note}</span>
+          </div>
+        )}
+        {related.length > 0 && (
+          <div className="mt-8 flex items-center gap-2.5 flex-wrap text-[11.5px]">
+            <span className="text-ink4 uppercase tracking-[0.12em] text-[10px] font-semibold">Связано</span>
+            {related.map(rc => (
+              <button key={rc.id} onClick={()=> onSelect && onSelect(rc.id)} title={rc.title}
+                className="font-mono text-ink3 hover:text-accent transition">
+                ⇄ {rc.id}
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ПЕРВИЧНОЕ ДЕЙСТВИЕ — рекомендация + кнопка отчёта */}
+      <section className="max-w-[760px]">
+        <p className="text-[13px] text-ink2 leading-relaxed mb-5">
+          {playbook[0] || 'Действий не требуется.'}
+        </p>
+        <button onClick={()=> setShowReport(v=>!v)}
+          className="text-[13px] font-semibold rounded-lg px-4 py-2.5 transition hover:brightness-110"
+          style={{background:'#57C1FF', color:'#07080A'}}>
+          Сформировать инцидент-отчёт
+        </button>
+
+        {showReport && (
+          <div className="mt-8 space-y-10 fade-in">
+            <div>
+              <h3 className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold mb-4">Плейбук реагирования</h3>
+              <ol className="space-y-3">
+                {playbook.map((r,i)=> (
+                  <li key={i} className="text-[13px] text-ink2 flex gap-3 items-start leading-snug">
+                    <span className="shrink-0 font-mono font-bold text-[12px] text-ink4 mt-px w-4">{i+1}</span>
+                    <span>{r}</span>
+                  </li>
+                ))}
+                {playbook.length===0 && <li className="text-[12px] text-ink4">Действий не требуется — легитимная активность.</li>}
+              </ol>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-2.5 mb-4 flex-wrap">
+                <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+                  placeholder="Anthropic API-ключ (опц.) — иначе mock"
+                  className="text-[12px] bg-panel2 border border-edge rounded-lg px-3 py-2 w-64 font-mono text-ink1 placeholder:text-ink4 focus:border-accent outline-none transition" />
+                <button onClick={genSAR} disabled={sarLoading}
+                  className="text-[12px] font-semibold rounded-lg px-4 py-2 transition disabled:opacity-50 hover:brightness-110"
+                  style={{background:'#1A1A1B', color:'#F4F4F6', border:'1px solid rgba(255,255,255,0.16)'}}>
+                  {sarLoading ? 'Генерация…' : '▸ Собрать черновик'}
+                </button>
+              </div>
+              {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='claude'?'#59D499':'#FFC533'}}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='claude'?'#59D499':'#FFC533'}}></span>
+                {sarMode==='claude' ? 'Сгенерировано через Claude (claude-sonnet-4-6)' : 'Mock-режим (детерминированный шаблон сервера)'}
+              </p>}
+              {sarText
+                ? <pre className="scanline text-[11.5px] text-ink2 whitespace-pre-wrap leading-relaxed bg-panel rounded-xl p-5 border border-edge font-mono fade-in">{sarText}</pre>
+                : <p className="text-[12px] text-ink4 leading-snug">Нажмите «Собрать черновик» — сервер соберёт инцидент-отчёт из триггеров (mock) или вызовет Claude, если введён ключ.</p>}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <p className="text-[10px] text-ink5 mt-16 leading-snug">⚠ Данные seed-корпуса синтетические (ИИН / ФИО / IP вымышлены). Прототип для AFM AI Hackathon 2026.</p>
+    </div>
+  );
+}
+
+/* =====================================================================
+   APP — оркестрация: грузит dataset + очередь из API, детальку по клику,
+   метрики на сервере, экран загрузки лога. Состояния loading/error везде.
+   ===================================================================== */
+function App() {
+  const [mode, setMode] = useState('queue'); // queue | incident | validation | upload
+
+  // --- dataset (шапка/объём) + список корпусов (переключатель) ---
+  const [dataset, setDataset] = useState(null);
+  const [datasets, setDatasets] = useState([]);
+  const [bootError, setBootError] = useState('');
+  const [bootLoading, setBootLoading] = useState(true);
+
+  // --- очередь ---
+  const [queue, setQueue] = useState(null);     // null = ещё не грузили
+  const [queueLoading, setQueueLoading] = useState(true);
+  const [queueError, setQueueError] = useState('');
+
+  // --- деталь ---
+  const [selId, setSelId] = useState(null);
+  const [detail, setDetail] = useState(null);   // {cs,res} адаптированная
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
+
+  // --- метрики ---
+  const [metrics, setMetrics] = useState(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsError, setMetricsError] = useState('');
+  const [alertThreshold, setAlertThreshold] = useState(55);
+
+  // --- отчёт ---
+  const [apiKey, setApiKey] = useState('');
+  const [sarText, setSarText] = useState('');
+  const [sarLoading, setSarLoading] = useState(false);
+  const [sarMode, setSarMode] = useState('');
+
+  // ── BOOT: GET /api/dataset + /api/datasets ───────────────────────────
+  const loadDataset = useCallback(async () => {
+    setBootLoading(true); setBootError('');
+    try {
+      const [ds, list] = await Promise.all([
+        apiGet('/api/dataset'),
+        apiGet('/api/datasets').catch(()=>({datasets:[]})),
+      ]);
+      setDataset(ds);
+      setDatasets((list && list.datasets) || []);
+    } catch (e) {
+      setBootError(e.message || 'Сервер недоступен');
+    } finally {
+      setBootLoading(false);
+    }
+  }, []);
+
+  // ── ОЧЕРЕДЬ: GET /api/incidents ──────────────────────────────────────
+  const loadQueue = useCallback(async () => {
+    setQueueLoading(true); setQueueError('');
+    try {
+      const q = await apiGet('/api/incidents');
+      setQueue((q && q.incidents) || []);
+    } catch (e) {
+      setQueueError(e.message || 'Не удалось загрузить очередь');
+    } finally {
+      setQueueLoading(false);
+    }
+  }, []);
+
+  // ── ДЕТАЛЬ: GET /api/incidents/:id ───────────────────────────────────
+  const loadDetail = useCallback(async (id) => {
+    setDetailLoading(true); setDetailError(''); setDetail(null);
+    try {
+      const d = await apiGet('/api/incidents/' + encodeURIComponent(id));
+      setDetail(adaptIncidentDetail(d));
+    } catch (e) {
+      setDetailError(e.message || 'Не удалось загрузить инцидент');
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
+
+  // ── МЕТРИКИ: GET /api/metrics?threshold= (debounced при движении ползунка)
+  const loadMetrics = useCallback(async (threshold) => {
+    setMetricsLoading(true); setMetricsError('');
+    try {
+      const m = await apiGet('/api/metrics?threshold=' + threshold);
+      setMetrics(m);
+    } catch (e) {
+      setMetricsError(e.message || 'Не удалось загрузить метрики');
+    } finally {
+      setMetricsLoading(false);
+    }
+  }, []);
+
+  // mount → грузим dataset + очередь
+  useEffect(() => { loadDataset(); loadQueue(); }, [loadDataset, loadQueue]);
+
+  // открыть инцидент по клику
+  const openIncident = (id) => { setSelId(id); setMode('incident'); };
+  // грузим деталь при выборе/смене инцидента
+  useEffect(() => {
+    if (selId && mode === 'incident') loadDetail(selId);
+    setSarText(''); setSarMode('');
+  }, [selId, mode, loadDetail]);
+
+  // грузим метрики при входе в Валидацию + debounce при движении порога
+  useEffect(() => {
+    if (mode !== 'validation') return;
+    const t = setTimeout(() => loadMetrics(alertThreshold), 220);
+    return () => clearTimeout(t);
+  }, [mode, alertThreshold, loadMetrics, dataset]);
+
+  // ── переключение корпуса: POST /api/dataset/:id/activate → перезагрузка ──
+  const activateDataset = useCallback(async (id) => {
+    try {
+      await apiPost('/api/dataset/' + encodeURIComponent(id) + '/activate', {});
+    } catch (e) { /* активация мягкая — продолжаем читать по id */ }
+    await loadDataset();
+    await loadQueue();
+    setMetrics(null);
+    setMode('queue');
+  }, [loadDataset, loadQueue]);
+
+  // ── после загрузки лога: активируем новый корпус и прыгаем в очередь ──
+  const onIngested = useCallback((datasetId, res) => {
+    setTimeout(async () => {
+      await activateDataset(datasetId);
+    }, 900); // небольшая пауза чтобы пользователь увидел итог анализа
+  }, [activateDataset]);
+
+  // ── ОТЧЁТ: POST /api/report/:id ──────────────────────────────────────
+  const genSAR = async () => {
+    if (!detail) return;
+    setSarLoading(true);
+    try {
+      const r = await apiPost('/api/report/' + encodeURIComponent(detail.cs.id), apiKey.trim() ? { apiKey: apiKey.trim() } : {});
+      setSarText(r.text || '(пустой ответ)');
+      setSarMode(r.mode || 'mock');
+    } catch (e) {
+      setSarText('Ошибка генерации отчёта: ' + e.message);
+      setSarMode('mock');
+    } finally { setSarLoading(false); }
+  };
+
+  // hero-статус из dataset (заменил локальный подсчёт по CASES)
+  const heroStat = (dataset && dataset.heroStat) || { threats: 0, critical: 0 };
+
+  const TABS = [
+    { id:'queue',      label:'Очередь' },
+    { id:'incident',   label:'Инцидент' },
+    { id:'validation', label:'Валидация' },
+    { id:'upload',     label:'Загрузить лог' },
+  ];
+
+  return (
+    <div className="min-h-full flex flex-col">
+      {/* ШАПКА */}
+      <header className="sticky top-0 z-20 bg-ink/85 backdrop-blur border-b border-edge px-8 pt-6 pb-0">
+        <div className="max-w-[1180px] mx-auto w-full">
+          <div className="flex items-end justify-between gap-6 flex-wrap">
+            <div className="flex items-center gap-3.5">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="shrink-0">
+                <path d="M12 2.5 4 5.5v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10v-6L12 2.5Z" stroke="#57C1FF" strokeWidth="1.5" fill="none"/>
+                <path d="M8.4 12.2l2.4 2.4 4.8-5" stroke="#59D499" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              <div className="leading-tight">
+                <h1 className="font-extrabold text-[15px] tracking-tightest text-ink1">
+                  AI&nbsp;Shield <span className="text-ink4 font-medium">·</span> <span className="text-ink3 font-semibold">Insider&nbsp;Guard</span>
+                </h1>
+                {/* hero-статус */}
+                {bootLoading
+                  ? <div className="skel h-3 w-44 mt-2"></div>
+                  : bootError
+                    ? <p className="text-[12px] mt-1.5 font-mono" style={{color:'#FF6161'}}>сервер недоступен — данные не получены</p>
+                    : <p className="text-[13px] mt-1.5 text-ink2">
+                        <span className="font-mono font-bold text-ink1">{heroStat.threats} инсайдер-угроз</span>
+                        <span className="text-ink4"> · </span>
+                        <span className="font-mono font-bold" style={{color:SEV.crit}}>{heroStat.critical} критических</span>
+                      </p>}
+              </div>
+            </div>
+
+            {/* NEW: пилюля корпуса (объём данных) + переключатель — видно, что это реальный масштаб */}
+            <div className="flex items-center gap-3 flex-wrap pb-1">
+              {dataset && !bootError && (
+                <span className="hidden sm:flex items-center gap-2 text-[10.5px] font-mono rounded-lg px-3 py-1.5"
+                  style={{background:'#101111', border:'1px solid rgba(255,255,255,0.08)', color:'#9C9C9D'}}>
+                  <span className="w-1.5 h-1.5 rounded-full" style={{background: dataset.source==='seed'?'#57C1FF':'#59D499'}}></span>
+                  <span className="text-ink2 font-semibold">{dataset.source}</span>
+                  <span className="text-ink5">·</span>
+                  <span className="text-ink1 font-bold">{fmt(dataset.eventCount)}</span> событий
+                  <span className="text-ink5">·</span>
+                  <span className="text-ink1 font-bold">{fmt(dataset.userCount)}</span> польз.
+                  <span className="text-ink5">·</span>
+                  <span className="text-ink1 font-bold">{fmt(dataset.dayCount)}</span> дн.
+                </span>
+              )}
+              {datasets.length > 1 && (
+                <DatasetSwitcher datasets={datasets} activeId={dataset && dataset.id} onActivate={activateDataset} />
+              )}
+            </div>
+          </div>
+
+          {/* baseline-микрокопия — делает UEBA-апгрейд легибельным для жюри */}
+          {dataset && dataset.baselineNote && !bootError && (
+            <p className="text-[10.5px] text-ink4 font-mono mt-2.5 leading-snug max-w-[760px]">
+              {dataset.baselineNote}
+            </p>
+          )}
+
+          {/* ТАБЫ */}
+          <nav className="flex items-center gap-7 mt-5 -mb-px flex-wrap">
+            {TABS.map(t => {
+              const on = mode === t.id;
+              const isUpload = t.id === 'upload';
+              return (
+                <button key={t.id} onClick={()=> setMode(t.id)}
+                  className={`relative text-[13px] pb-3 transition flex items-center gap-1.5 ${on ? 'text-ink1 font-semibold' : (isUpload ? 'text-accent/80 hover:text-accent font-medium' : 'text-ink4 hover:text-ink2 font-medium')}`}>
+                  {isUpload && (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                      <path d="M12 16V5m0 0l-4 4m4-4l4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      <path d="M5 18h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                    </svg>
+                  )}
+                  {t.label}
+                  <span className="absolute left-0 right-0 bottom-0 h-[2px] rounded-full transition"
+                    style={{background: on ? '#57C1FF' : 'transparent'}}></span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      </header>
+
+      {/* ===== РЕЖИМ 1 — ОЧЕРЕДЬ ===== */}
+      {mode === 'queue' && (
+        <main className="flex-1 px-8 py-10 fade-in">
+          <div className="max-w-[1180px] mx-auto w-full">
+            {bootError
+              ? <ErrorPane message={bootError} onRetry={()=>{ loadDataset(); loadQueue(); }} />
+              : queueError
+                ? <ErrorPane message={queueError} onRetry={loadQueue} />
+                : (queueLoading || queue===null)
+                  ? <QueueSkeleton />
+                  : queue.length === 0
+                    ? <div className="text-center py-20 text-[13px] text-ink4">В этом корпусе инциденты выше порога не найдены — активность в пределах персональных baseline.</div>
+                    : (<>
+                        {queue.map(({ id, title, channel, score, priority, primaryTrigger, label }) => {
+                          const c = SEV[priority.color];
+                          const pLabel = priority.lvl.split(' ')[0];
+                          return (
+                            <button key={id} onClick={()=> openIncident(id)}
+                              className="group w-full text-left flex items-center gap-5 py-5 border-b border-edge/60 hover:bg-panel2/40 rounded-lg px-4 -mx-4 transition">
+                              <span className="flex items-center gap-3.5 shrink-0 w-[88px]">
+                                <span className="w-[3px] h-9 rounded-full shrink-0" style={{background:c, opacity:0.9}}></span>
+                                <span className="font-mono font-extrabold text-[26px] leading-none kpi-tick" style={{color:c}}>{score}</span>
+                              </span>
+                              <span className="flex-1 min-w-0">
+                                <span className="block text-[15px] text-ink1 font-medium leading-snug truncate group-hover:text-white transition">{title}</span>
+                                <span className="block text-[11.5px] text-ink4 font-mono mt-1 truncate">
+                                  {id} · {channel}
+                                  {primaryTrigger && primaryTrigger.label ? <span className="text-ink5"> · {primaryTrigger.label}</span> : null}
+                                </span>
+                              </span>
+                              <span className="hidden md:flex items-center gap-2 shrink-0">
+                                {label && <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded"
+                                  style={{color:label.malicious?'#FF6161':'#59D499', border:'1px solid '+(label.malicious?'#FF6161':'#59D499')+'40'}}>GT</span>}
+                                <Tag sev={priority.color}>{pLabel}</Tag>
+                                <span className="text-[11px] font-mono uppercase tracking-wide" style={{color: priority.color==='good' ? '#9C9C9D' : c}}>
+                                  {SEV_LABEL[priority.color]}
+                                </span>
+                              </span>
+                              <span className="text-ink5 group-hover:text-ink3 transition shrink-0 text-[18px] leading-none">›</span>
+                            </button>
+                          );
+                        })}
+                        <p className="text-[11px] text-ink4 mt-8 leading-relaxed">
+                          Отсортировано сервером по risk-score · самое опасное первым. Клик по строке — разбор инцидента.
+                          {dataset && <span> Корпус: <span className="font-mono text-ink3">{fmt(dataset.eventCount)} событий · {fmt(dataset.userCount)} польз. · {fmt(dataset.dayCount)} дн.</span></span>}
+                        </p>
+                      </>)}
+          </div>
+        </main>
+      )}
+
+      {/* ===== РЕЖИМ 2 — ИНЦИДЕНТ ===== */}
+      {mode === 'incident' && (
+        <main className="flex-1 px-8 py-10">
+          <div className="max-w-[1180px] mx-auto w-full">
+            {!selId
+              ? <div className="text-center py-20 text-[13px] text-ink4">Выберите инцидент в очереди.</div>
+              : detailError
+                ? <ErrorPane message={detailError} onRetry={()=> loadDetail(selId)} />
+                : (detailLoading || !detail)
+                  ? <DetailSkeleton />
+                  : <Detail key={detail.cs.id} cs={detail.cs} res={detail.res}
+                      apiKey={apiKey} setApiKey={setApiKey} onSelect={openIncident} onBack={()=> setMode('queue')}
+                      sarText={sarText} sarLoading={sarLoading} sarMode={sarMode} genSAR={genSAR} />}
+          </div>
+        </main>
+      )}
+
+      {/* ===== РЕЖИМ 3 — ВАЛИДАЦИЯ ===== */}
+      {mode === 'validation' && (
+        <main className="flex-1 px-8 py-10 fade-in">
+          <div className="max-w-[1180px] mx-auto w-full">
+            <Validation threshold={alertThreshold} setThreshold={setAlertThreshold}
+              m={metrics} loading={metricsLoading} error={metricsError}
+              onRetry={()=> loadMetrics(alertThreshold)}
+              datasetName={dataset ? dataset.name : ''} />
+          </div>
+        </main>
+      )}
+
+      {/* ===== РЕЖИМ 4 — ЗАГРУЗКА ЛОГА ===== */}
+      {mode === 'upload' && (
+        <main className="flex-1 px-8 py-10 fade-in">
+          <div className="max-w-[1180px] mx-auto w-full">
+            <UploadScreen onIngested={onIngested} datasets={datasets}
+              onActivate={activateDataset} activeId={dataset && dataset.id} />
+          </div>
+        </main>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

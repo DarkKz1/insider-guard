@@ -1,0 +1,9 @@
+# Forces native build toolchain so better-sqlite3 compiles on Railway.
+[phases.setup]
+nixPkgs = ["nodejs_20", "python3", "gcc", "gnumake"]
+
+[phases.install]
+cmds = ["npm ci || npm install"]
+
+[start]
+cmd = "npm run seed -- --keep && npm start"

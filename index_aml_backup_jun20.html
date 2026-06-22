@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI Shield — Финансовый щит АФМ РК</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Babel standalone (новые версии) по умолчанию транспилирует JSX в automatic runtime
+  // и эмитит `import {jsx} from "react/jsx-runtime"` → инжектится как classic <script> →
+  // SyntaxError "Cannot use import statement outside a module", React не монтируется.
+  // Регистрируем пресет с classic runtime (React.createElement) — версионно-независимый фикс.
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]],
+  });
+</script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: '#0b0f1a',
+          panel: '#121826',
+          panel2: '#1a2234',
+          edge: '#26324a',
+          accent: '#3b82f6',
+          good: '#22c55e',
+          warn: '#f59e0b',
+          bad: '#ef4444',
+          crit: '#dc2626',
+        },
+        fontFamily: {
+          mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        }
+      }
+    }
+  }
+</script>
+<style>
+  html, body, #root { height: 100%; }
+  body { background: #0b0f1a; color: #e5e9f0; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: #0b0f1a; }
+  ::-webkit-scrollbar-thumb { background: #26324a; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+  .fade-in { animation: fade .25s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px);} to {opacity:1; transform:none;} }
+  .pulse-dot { animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react-classic">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* =====================================================================
+   AI Shield — прототип для трека AI Shield (id: ai-shield), AFM AI Hackathon 2026
+   Полностью оффлайн. Детерминированный mock-AI (граф + эвристики + scoring + SHAP-like).
+   Опционально: реальный вызов Claude (sonnet) для генерации нарратива SAR.
+   ВСЕ ДАННЫЕ СИНТЕТИЧЕСКИЕ. Никаких реальных персональных данных.
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   СИНТЕТИЧЕСКИЙ ДАТАСЕТ
+   Каждый "кейс" = подграф транзакций (счета + переводы) с известной типологией.
+   Поля транзакций имитируют структуру IBM AML (From/To Account, Amount, Format, Ts).
+   --------------------------------------------------------------------- */
+
+// Утилита: генерим иид-счёта в KZ-стиле (IBAN-подобный + банк)
+const BANKS = ['Kaspi', 'Halyk', 'Forte', 'Jusan', 'BCC', 'Freedom', 'Bereke'];
+
+function acc(id, bank, label, opened, tags=[]) {
+  return { id, bank, label, opened, tags };
+}
+
+// Кейсы. Каждый: id, схема(typology), title, narrative-факты, accounts[], txs[]
+// tx: {id, from, to, amount(₸), ts, format}
+const CASES = [
+  // 1. SMURFING / STRUCTURING — телеграм-казино, дробление под порог
+  {
+    id: 'CASE-1042',
+    typology: 'smurfing',
+    title: 'Телеграм-казино: дробление платежей (smurfing)',
+    channel: 'Telegram-канал @lucky_aqsha_bot',
+    facts: 'Сеть из 9 «дроп-карт» переводит мелкими суммами (180–199 тыс ₸, под порог обязательного контроля 1 млн ₸) на один агрегирующий счёт за ~9 часов. Агрегатор затем выводит почти всё единым платежом на счёт-прокладку. Типология: FATF PML 2018 «professional money laundering / smurfing».',
+    source: 'FATF «Professional Money Laundering» (2018) · FATF «Virtual Assets Red Flag Indicators» (14.09.2020): structuring под порог отчётности.',
+    hub: 'A-HUB-77',
+    accounts: [
+      acc('A-HUB-77', 'Kaspi', 'Агрегатор (хаб)', '2026-05-30', ['new_account','high_velocity']),
+      acc('A-OUT-9', 'Forte', 'Прокладка / вывод', '2026-04-11', ['passthrough']),
+      ...Array.from({length:9}, (_,i)=> acc(`A-MUL-${i+1}`, BANKS[i%BANKS.length], `Дроп-карта #${i+1}`, '2026-06-0'+((i%9)+1), ['drop_card','near_zero_balance'])),
+    ],
+    txs: [
+      // 9 inbound мелких (структурирование), затем 1 крупный outbound
+      ...Array.from({length:9}, (_,i)=> ({ id:`T-${1000+i}`, from:`A-MUL-${i+1}`, to:'A-HUB-77', amount: 180000 + i*2300, ts:`2026-06-10 0${i%9}:${10+i*3}`, format:'Transfer' })),
+      { id:'T-1100', from:'A-HUB-77', to:'A-OUT-9', amount: 1698000, ts:'2026-06-11 02:15', format:'Transfer' },
+    ],
+  },
+
+  // 2. CYCLE / CIRCULAR — круговой перевод, отмыв форекс-клуба
+  {
+    id: 'CASE-1188',
+    typology: 'cycle',
+    title: 'Круговой перевод A→B→C→A (форекс-клуб)',
+    channel: 'Forex-клуб «Alpari Astana» (нелицензированный)',
+    facts: 'Средства проходят замкнутый цикл из 4 счетов и возвращаются к источнику почти в полном объёме (комиссия-«испарение» ~3%). Классическая layering-схема для обрыва следа происхождения.',
+    source: 'IBM «Transactions for AML» (NeurIPS 2023): граф-мотив cycle. FATF PML 2018: layering.',
+    hub: 'B-01',
+    accounts: [
+      acc('B-01', 'Jusan', 'Источник цикла', '2025-12-02', ['cycle_member']),
+      acc('B-02', 'Halyk', 'Звено 2', '2026-01-15', ['cycle_member']),
+      acc('B-03', 'BCC', 'Звено 3 (ИП «Финтрейд»)', '2026-02-20', ['cycle_member','shell_company']),
+      acc('B-04', 'Freedom', 'Звено 4', '2026-03-01', ['cycle_member']),
+    ],
+    txs: [
+      { id:'T-2001', from:'B-01', to:'B-02', amount: 8200000, ts:'2026-06-09 11:00', format:'Transfer' },
+      { id:'T-2002', from:'B-02', to:'B-03', amount: 8100000, ts:'2026-06-09 13:40', format:'Transfer' },
+      { id:'T-2003', from:'B-03', to:'B-04', amount: 8000000, ts:'2026-06-09 16:05', format:'Transfer' },
+      { id:'T-2004', from:'B-04', to:'B-01', amount: 7950000, ts:'2026-06-09 19:30', format:'Transfer' },
+    ],
+  },
+
+  // 3. DROP-CARD MULE — TRANSFER→немедленный CASH-OUT (Kaspi дроп-карты)
+  {
+    id: 'CASE-1203',
+    typology: 'drop_card',
+    title: 'Дроп-карты Kaspi: проходной счёт мула',
+    channel: 'Скупка карт через объявления «работа, оплата сразу»',
+    facts: 'На счёт молодого держателя (открыт 4 дня назад) приходит крупный перевод, и в течение 38 минут идёт полный CASH-OUT через банкоматы в 3 городах. Баланс возвращается к нулю. Признак классического денежного мула.',
+    source: 'FATF PML 2018: «rapid in, rapid out, no economic rationale»; «mules, usually students». Мост к статистике АФМ (6,2 тыс дроп-карт, оборот 24 млрд ₸ за 2024).',
+    hub: 'C-MULE',
+    accounts: [
+      acc('C-SRC', 'Forte', 'Отправитель (жертва?)', '2024-08-12', []),
+      acc('C-MULE', 'Kaspi', 'Дроп-карта мула', '2026-06-09', ['drop_card','new_account','near_zero_balance','high_velocity']),
+      acc('C-ATM1', 'Kaspi', 'CASH-OUT Алматы', '—', ['cash_out']),
+      acc('C-ATM2', 'Kaspi', 'CASH-OUT Шымкент', '—', ['cash_out']),
+      acc('C-ATM3', 'Kaspi', 'CASH-OUT Астана', '—', ['cash_out']),
+    ],
+    txs: [
+      { id:'T-3001', from:'C-SRC', to:'C-MULE', amount: 2400000, ts:'2026-06-13 14:02', format:'Transfer' },
+      { id:'T-3002', from:'C-MULE', to:'C-ATM1', amount: 900000, ts:'2026-06-13 14:18', format:'Cash-Out' },
+      { id:'T-3003', from:'C-MULE', to:'C-ATM2', amount: 850000, ts:'2026-06-13 14:31', format:'Cash-Out' },
+      { id:'T-3004', from:'C-MULE', to:'C-ATM3', amount: 640000, ts:'2026-06-13 14:40', format:'Cash-Out' },
+    ],
+  },
+
+  // 4. PONZI / SCATTER-GATHER — пирамида «300% в месяц»
+  {
+    id: 'CASE-1311',
+    typology: 'ponzi',
+    title: 'Финансовая пирамида «инвестиции 300% в месяц»',
+    channel: 'Instagram-проект «AltynInvest — пассивный доход»',
+    facts: 'Один центральный счёт собирает средства от 7 «вкладчиков» (fan-in), затем веерно выплачивает части ранним участникам (fan-out) — признак выплаты старым за счёт новых. Приток в ~6.8 раза превышает отток: остаток выводится организатором.',
+    source: 'IBM «Transactions for AML» (NeurIPS 2023): граф-мотив scatter-gather. EAG-2023: типология финансовых пирамид.',
+    hub: 'D-CORE',
+    accounts: [
+      acc('D-CORE', 'Halyk', 'Счёт «проекта» (организатор)', '2026-04-20', ['scatter_gather','high_velocity']),
+      ...Array.from({length:7}, (_,i)=> acc(`D-IN-${i+1}`, BANKS[(i+2)%BANKS.length], `Вкладчик #${i+1}`, '2026-05-1'+(i%9), ['victim'])),
+      ...Array.from({length:3}, (_,i)=> acc(`D-OUT-${i+1}`, BANKS[(i)%BANKS.length], `Ранний участник (выплата)`, '2026-04-2'+(i+1), ['payout'])),
+    ],
+    txs: [
+      ...Array.from({length:7}, (_,i)=> ({ id:`T-${4000+i}`, from:`D-IN-${i+1}`, to:'D-CORE', amount: 600000 + i*150000, ts:`2026-06-08 1${i%9}:00`, format:'Transfer' })),
+      ...Array.from({length:3}, (_,i)=> ({ id:`T-${4100+i}`, from:'D-CORE', to:`D-OUT-${i+1}`, amount: 320000 + i*40000, ts:`2026-06-09 1${i%9}:00`, format:'Transfer' })),
+    ],
+  },
+
+  // 5. FAKE CHARITY — фейк-благотворительность, сбор на «лечение»
+  {
+    id: 'CASE-1357',
+    typology: 'fake_charity',
+    title: 'Фейк-благотворительность: сбор на «лечение ребёнка»',
+    channel: 'WhatsApp-рассылка + поддельный фонд «Жүрек»',
+    facts: 'Десятки мелких донатов (5–23 тыс ₸) от разных физлиц стекаются на личную карту, далее почти единым платежом уходят на крипто-обменник (остаток ≈ 0 — транзит). Нет признаков целевого использования; счёт-получатель связан с ранее помеченным крипто-кейсом.',
+    source: 'FATF «Virtual Assets Red Flag Indicators» (2020): structuring под порог + конвертация в крипто. EAG-2024: крипто-каналы.',
+    hub: 'E-COL',
+    accounts: [
+      acc('E-COL', 'Kaspi', 'Личная карта «волонтёра»', '2026-05-22', ['high_fan_in','passthrough']),
+      acc('E-CRYPTO', 'Bereke', 'Шлюз на крипто-обменник', '2026-01-09', ['crypto_gateway','flagged_before']),
+      ...Array.from({length:10}, (_,i)=> acc(`E-D-${i+1}`, BANKS[i%BANKS.length], `Донор #${i+1}`, '—', ['donor'])),
+    ],
+    txs: [
+      ...Array.from({length:10}, (_,i)=> ({ id:`T-${5000+i}`, from:`E-D-${i+1}`, to:'E-COL', amount: 5000 + i*2000, ts:`2026-06-12 0${i%9}:${10+i}`, format:'Transfer' })),
+      { id:'T-5100', from:'E-COL', to:'E-CRYPTO', amount: 138000, ts:'2026-06-12 21:50', format:'Crypto' },
+    ],
+  },
+
+  // 6. SHELL / ROUND-AMOUNTS — фирмы-однодневки, ровные суммы
+  {
+    id: 'CASE-1402',
+    typology: 'shell',
+    title: 'Транзит через фирмы-однодневки (ровные суммы)',
+    channel: 'Цепочка ИП/ТОО без реальной деятельности',
+    facts: 'Идеально ровные суммы (ровно 5 000 000 ₸) последовательно проходят через 3 ТОО, открытых в один месяц, с одинаковым видом «оплата за консультационные услуги». Нет НДС-следа, нет сотрудников. Транзит без экономического смысла.',
+    source: 'FATF PML 2018 + EAG 2023: fly-by-night companies / фирмы-однодневки, proxy structures.',
+    hub: 'F-SH1',
+    accounts: [
+      acc('F-SRC', 'Forte', 'Заказчик (фиктивный)', '2025-11-01', []),
+      acc('F-SH1', 'Jusan', 'ТОО «Консалт-А»', '2026-05-03', ['shell_company','round_amount']),
+      acc('F-SH2', 'BCC', 'ТОО «Консалт-Б»', '2026-05-05', ['shell_company','round_amount']),
+      acc('F-SH3', 'Halyk', 'ТОО «Консалт-В»', '2026-05-07', ['shell_company','round_amount','passthrough']),
+      acc('F-DST', 'Freedom', 'Конечный бенефициар', '2026-05-09', ['cash_out']),
+    ],
+    txs: [
+      { id:'T-6001', from:'F-SRC', to:'F-SH1', amount: 5000000, ts:'2026-06-07 10:00', format:'Transfer' },
+      { id:'T-6002', from:'F-SH1', to:'F-SH2', amount: 5000000, ts:'2026-06-07 12:00', format:'Transfer' },
+      { id:'T-6003', from:'F-SH2', to:'F-SH3', amount: 5000000, ts:'2026-06-07 14:00', format:'Transfer' },
+      { id:'T-6004', from:'F-SH3', to:'F-DST', amount: 5000000, ts:'2026-06-07 16:30', format:'Transfer' },
+    ],
+  },
+
+  // 7. NORMAL — легитимная зарплата/быт (контроль: НЕ должен флагаться высоко)
+  {
+    id: 'CASE-2001',
+    typology: 'legit',
+    title: 'Зарплатный проект ТОО (легитимно)',
+    channel: 'Зарплатная ведомость',
+    facts: 'Работодатель с историей 2+ года выплачивает зарплату 6 сотрудникам в обычный день, суммы соответствуют профилю, далее обычные бытовые траты. Признаков структурирования/транзита нет. Это контрольный кейс — система НЕ должна давать ложную тревогу.',
+    source: 'Контрольный negative. На синтетике результаты «overly optimistic» (Elliptic: самые подозрительные ≈ наименее аномальны) — реальные отмыватели маскируются под норму; держим осторожный baseline.',
+    hub: 'G-EMP',
+    accounts: [
+      acc('G-EMP', 'Halyk', 'ТОО «СтройКом» (ФОТ)', '2024-02-01', ['established']),
+      ...Array.from({length:6}, (_,i)=> acc(`G-W-${i+1}`, BANKS[i%BANKS.length], `Сотрудник #${i+1}`, '2024-0'+((i%9)+1)+'-15', ['salary'])),
+    ],
+    txs: [
+      ...Array.from({length:6}, (_,i)=> ({ id:`T-${7000+i}`, from:'G-EMP', to:`G-W-${i+1}`, amount: 350000 + i*30000, ts:`2026-06-10 09:0${i}`, format:'Transfer' })),
+    ],
+  },
+
+  // 8. CRYPTO LAYERING — крипто-отмыв, дробление на обменники
+  {
+    id: 'CASE-1490',
+    typology: 'crypto',
+    title: 'Крипто-отмыв: дробление на P2P-обменники',
+    channel: 'P2P USDT через серые обменники',
+    facts: 'Крупный входящий перевод дробится на 6 платежей в адрес разных крипто-шлюзов в течение 3 часов. Один из шлюзов ранее фигурировал в кейсе по бирже типа RAKS. Цель — разрыв следа через волатильный актив.',
+    source: 'FATF «Virtual Assets Red Flag Indicators» (2020): structuring под порог отчётности через VA. EAG-2024: крипто (Казахстан лидирует проект).',
+    hub: 'H-SRC',
+    accounts: [
+      acc('H-SRC', 'Freedom', 'Источник средств', '2026-03-18', ['high_velocity']),
+      ...Array.from({length:6}, (_,i)=> acc(`H-CG-${i+1}`, BANKS[(i+3)%BANKS.length], `Крипто-шлюз #${i+1}`, '2026-0'+((i%6)+1)+'-10', i===2?['crypto_gateway','flagged_before']:['crypto_gateway'])),
+    ],
+    txs: [
+      ...Array.from({length:6}, (_,i)=> ({ id:`T-${8000+i}`, from:'H-SRC', to:`H-CG-${i+1}`, amount: 450000 + i*60000, ts:`2026-06-11 1${i%5}:${10+i*4}`, format:'Crypto' })),
+    ],
+  },
+
+  // 9. BENIGN — легитимный продавец маркетплейса (пограничный negative для precision)
+  {
+    id: 'CASE-2002',
+    typology: 'benign',
+    title: 'Продавец маркетплейса: много мелких поступлений (легитимно)',
+    channel: 'Выплаты от покупателей маркетплейса',
+    facts: 'ИП-продавец с историей 3 года получает 8 небольших оплат от разных покупателей за день (высокий fan-in, суммы под порогом). НО счёт устоявшийся, реальная торговля, НДС-след есть. Пограничный кейс: наивный порог/«дробление» пометит — граф-контекст и история счёта снимают тревогу. Контрольный negative для precision.',
+    source: 'Пограничный negative: чистая граф-структура (fan-in) даёт ложную тревогу — node-features (история счёта, НДС-след) её снимают (INFORMS J. Data Science 2025, KU Leuven, arXiv 2405.19383).',
+    hub: 'I-SELLER',
+    accounts: [
+      acc('I-SELLER', 'Halyk', 'ИП «Магазин» (история 3 года)', '2023-03-01', ['established']),
+      ...Array.from({length:8}, (_,i)=> acc(`I-B-${i+1}`, BANKS[i%BANKS.length], `Покупатель #${i+1}`, '—', ['customer'])),
+    ],
+    txs: [
+      ...Array.from({length:8}, (_,i)=> ({ id:`T-${9000+i}`, from:`I-B-${i+1}`, to:'I-SELLER', amount: 12000 + i*4000, ts:`2026-06-10 1${i%5}:${10+i}`, format:'Transfer' })),
+    ],
+  },
+];
+
+// Ground-truth: какие кейсы реально нелегитимны (для честных метрик precision/recall).
+const BENIGN_TYPOLOGIES = new Set(['legit', 'benign']);
+const isIllicit = (cs) => !BENIGN_TYPOLOGIES.has(cs.typology);
+
+// Кросс-связь кейсов через общий крипто-шлюз: счета с tag 'flagged_before' помечены
+// как ранее фигурировавшие в другом деле — мост charity↔crypto (не мега-граф, а ссылка).
+function relatedCases(cs) {
+  const myFlagged = cs.accounts.some(a => (a.tags || []).includes('flagged_before'));
+  if (!myFlagged) return [];
+  return CASES
+    .filter(o => o.id !== cs.id && o.accounts.some(a => (a.tags || []).includes('flagged_before')))
+    .map(o => ({ id: o.id, title: o.title }));
+}
+
+/* ---------------------------------------------------------------------
+   ДЕТЕРМИНИРОВАННЫЙ ДВИЖОК ДЕТЕКТА (mock-AI)
+   1) Графовые эвристики на adjacency (networkx-эквивалент в JS)
+   2) Табличные триггеры (структурирование, velocity, ровные суммы…)
+   3) Risk score 0-100 (взвешенная сумма триггеров) + приоритет
+   4) SHAP-like вклад каждого фактора (additive contributions)
+   --------------------------------------------------------------------- */
+
+const THRESHOLD_CONTROL = 1000000; // порог обязательного контроля, ₸
+
+function buildGraph(cs) {
+  const nodes = {};
+  cs.accounts.forEach(a => { nodes[a.id] = { ...a, inAmt:0, outAmt:0, inDeg:0, outDeg:0 }; });
+  cs.txs.forEach(t => {
+    if (!nodes[t.from]) nodes[t.from] = { id:t.from, bank:'?', label:t.from, opened:'—', tags:[], inAmt:0, outAmt:0, inDeg:0, outDeg:0 };
+    if (!nodes[t.to])   nodes[t.to]   = { id:t.to, bank:'?', label:t.to, opened:'—', tags:[], inAmt:0, outAmt:0, inDeg:0, outDeg:0 };
+    nodes[t.from].outAmt += t.amount; nodes[t.from].outDeg++;
+    nodes[t.to].inAmt   += t.amount;  nodes[t.to].inDeg++;
+  });
+  return nodes;
+}
+
+// поиск простого цикла A->...->A (DFS, до длины 6)
+function hasCycle(cs) {
+  const adj = {};
+  cs.txs.forEach(t => { (adj[t.from] = adj[t.from] || []).push(t.to); });
+  const start = Object.keys(adj);
+  for (const s of start) {
+    const stack = [[s, [s]]];
+    while (stack.length) {
+      const [n, path] = stack.pop();
+      for (const m of (adj[n] || [])) {
+        if (m === s && path.length >= 3) return path.concat(s);
+        if (!path.includes(m) && path.length < 6) stack.push([m, path.concat(m)]);
+      }
+    }
+  }
+  return null;
+}
+
+function fmt(n) { return new Intl.NumberFormat('ru-RU').format(Math.round(n)); }
+
+// Главная функция скоринга. Возвращает {score, priority, triggers[], shap[], graphStats}
+function analyze(cs) {
+  const nodes = buildGraph(cs);
+  const nodeArr = Object.values(nodes);
+  const triggers = []; // {code, label, weight, detail, severity}
+
+  const add = (code, label, weight, detail, severity='warn') =>
+    triggers.push({ code, label, weight, detail, severity });
+
+  // --- ГРАФ: структурирование (fan-in мелкими под порог) ---
+  const hub = nodes[cs.hub];
+  const inboundToHub = cs.txs.filter(t => t.to === cs.hub);
+  const smallUnder = inboundToHub.filter(t => t.amount < THRESHOLD_CONTROL);
+  let structuringHub = null; // хаб, на котором сработало структурирование (для взаимоисключения с FAN_IN)
+  if (inboundToHub.length >= 5 && smallUnder.length >= 5) {
+    structuringHub = cs.hub;
+    const ratioUnder = smallUnder.length / inboundToHub.length;
+    add('STRUCTURING', 'Структурирование (smurfing)', 28,
+      `${smallUnder.length} входящих платежей ниже порога контроля ${fmt(THRESHOLD_CONTROL)} ₸ на один счёт (${Math.round(ratioUnder*100)}% — под порогом). Дробление для обхода обязательного мониторинга.`, 'bad');
+  }
+
+  // --- ГРАФ: цикл ---
+  const cyc = hasCycle(cs);
+  if (cyc) {
+    add('CYCLE', 'Круговой перевод (layering)', 30,
+      `Обнаружен замкнутый цикл: ${cyc.join(' → ')}. Средства возвращаются к источнику — классический разрыв следа происхождения.`, 'crit');
+  }
+
+  // --- ГРАФ: fan-out / scatter-gather ---
+  // scatter-gather (пирамида): один счёт собирает с многих И раздаёт на многих.
+  const sg = nodeArr.find(n => n.inDeg >= 5 && n.outDeg >= 3);
+  const fanIn  = nodeArr.find(n => n.inDeg >= 6);
+  if (sg) {
+    const r = sg.inAmt / Math.max(1, sg.outAmt);
+    add('SCATTER_GATHER', 'Сбор-и-раздача (fan-in + fan-out)', 32,
+      `Счёт ${sg.id}: собирает с ${sg.inDeg} источников и раздаёт на ${sg.outDeg} получателей. Приток/отток = ${r.toFixed(1)}× — модель «выплата старым за счёт новых» (финансовая пирамида), остаток оседает у организатора.`, 'crit');
+  } else if (fanIn && fanIn.id !== structuringHub) {
+    // FAN_IN добавляем ТОЛЬКО если на этом же хабе уже не сработало структурирование —
+    // иначе один и тот же fan-in считается дважды (double-count). Взаимоисключение.
+    add('FAN_IN', 'Высокий fan-in (агрегация)', 14,
+      `Счёт ${fanIn.id} собирает средства с ${fanIn.inDeg} разных источников за короткое окно.`, 'warn');
+  }
+
+  // --- ГРАФ: проходной счёт / passthrough (in≈out, near-zero остаток) ---
+  const passthrough = nodeArr.find(n => n.inAmt > 0 && n.outAmt > 0 &&
+    Math.abs(n.inAmt - n.outAmt) / n.inAmt < 0.08 && (n.inDeg+n.outDeg) >= 2);
+  if (passthrough) {
+    add('PASSTHROUGH', 'Проходной счёт (near-zero остаток)', 18,
+      `Счёт ${passthrough.id}: приток ${fmt(passthrough.inAmt)} ≈ отток ${fmt(passthrough.outAmt)} ₸, остаток ≈ 0. Транзит без удержания средств.`, 'bad');
+  }
+
+  // --- ТАБЛИЧНОЕ: новый счёт + высокая velocity (дроп) ---
+  const today = new Date('2026-06-13');
+  cs.accounts.forEach(a => {
+    if (a.opened === '—') return;
+    const days = Math.round((today - new Date(a.opened)) / 86400000);
+    const n = nodes[a.id];
+    if (days >= 0 && days <= 7 && (n.outDeg + n.inDeg) >= 3) {
+      add('NEW_HIGH_VELOCITY', 'Новый счёт + высокая активность', 20,
+        `Счёт ${a.id} (${a.bank}) открыт ${days} дн. назад, уже ${n.inDeg+n.outDeg} операций. Профиль дроп-счёта / мула.`, 'bad');
+    }
+  });
+
+  // --- ТАБЛИЧНОЕ: быстрый CASH-OUT после поступления (мул) ---
+  const cashOuts = cs.txs.filter(t => t.format === 'Cash-Out');
+  if (cashOuts.length >= 2) {
+    add('RAPID_CASHOUT', 'Молниеносный CASH-OUT', 24,
+      `${cashOuts.length} операций обналичивания сразу после поступления (вывод через банкоматы в разных городах). Признак денежного мула.`, 'crit');
+  }
+
+  // --- ТАБЛИЧНОЕ: крипто-шлюз ---
+  const cryptoTx = cs.txs.filter(t => t.format === 'Crypto');
+  if (cryptoTx.length >= 1) {
+    const flagged = cs.accounts.some(a => a.tags.includes('flagged_before'));
+    const split = cryptoTx.length >= 4; // дробление одного источника на много шлюзов = layering
+    const w = (flagged ? 22 : 12) + (split ? 12 : 0);
+    add('CRYPTO_LAYERING', 'Дробление на крипто-шлюзы', w,
+      `${cryptoTx.length} перевод(ов) на крипто-обменник(и)${split ? ' (дробление одного источника на множество шлюзов — layering)' : ''}${flagged ? '. Один из шлюзов РАНЕЕ помечен в другом кейсе (связь с известной сетью).' : '.'} Конвертация в волатильный актив для разрыва следа.`, (flagged || split) ? 'bad' : 'warn');
+  }
+
+  // --- ТАБЛИЧНОЕ: ровные суммы (round amounts) ---
+  const rounds = cs.txs.filter(t => t.amount % 1000000 === 0);
+  if (rounds.length >= 3) {
+    add('ROUND_AMOUNTS', 'Идеально ровные суммы', 12,
+      `${rounds.length} операций ровными суммами (кратно 1 млн ₸) подряд через цепочку — нетипично для реальной хоз. деятельности, признак фиктивного транзита.`, 'warn');
+  }
+
+  // --- ТАБЛИЧНОЕ: фирмы-однодневки ---
+  const shells = cs.accounts.filter(a => a.tags.includes('shell_company'));
+  if (shells.length >= 2) {
+    add('SHELL_CHAIN', 'Цепочка фирм-однодневок', 16,
+      `${shells.length} ТОО/ИП без реальной деятельности (открыты в один период, нет НДС-следа), используются как звенья транзита.`, 'bad');
+  }
+
+  // --- если ничего серьёзного — это легитимный кейс ---
+  if (triggers.length === 0) {
+    add('CLEAN', 'Аномалий не выявлено', 0,
+      'Профиль операций соответствует заявленной деятельности (зарплатный проект, устоявшийся отправитель, бытовые суммы). Ложная тревога не сформирована.', 'good');
+  }
+
+  // --- SCORE: сумма весов → 0-100 с насыщением + контекст-снижение для устоявшихся счетов ---
+  const sumW = triggers.reduce((s,t)=> s + t.weight, 0);
+  // established (счёт с историей 1+ год) и без жёстких крит-признаков (цикл / обнал / пирамида)
+  // → снижаем риск, чтобы не штрафовать легальный бизнес = меньше ложных тревог.
+  const established = cs.accounts.some(a => (a.tags || []).includes('established'));
+  const hardCrit = triggers.some(t => ['CYCLE','RAPID_CASHOUT','SCATTER_GATHER'].includes(t.code));
+  let mitigation = null, effRaw = sumW;
+  if (established && !hardCrit && sumW > 0) {
+    effRaw = sumW * 0.45;
+    mitigation = { factor: 0.45, note: 'Счёт с историей 1+ год (established) и без жёстких крит-признаков (цикл / обнал / пирамида) → контекст снижает риск, чтобы не штрафовать легальный бизнес.' };
+  }
+  // ВАЖНО: никакого clamp по ground-truth label (никакой "if legit → score↓") —
+  // это была бы утечка целевой переменной. Score определяется ТОЛЬКО триггерами движка.
+  let score = Math.round(100 * (1 - Math.exp(-effRaw / 38)));
+  score = Math.max(0, Math.min(100, score));
+
+  // --- SHAP-like: вклад каждого триггера в финальный score (additive). ---
+  // Largest-remainder (Hamilton): целочисленные доли, сумма которых ТОЧНО === score
+  // (обычный Math.round по каждому даёт sum≠score из-за ошибок округления).
+  const shapBase = triggers.filter(t => t.weight > 0);
+  let shap = [];
+  if (shapBase.length && sumW) {
+    const quotas = shapBase.map(t => ({ t, exact: (t.weight / sumW) * score }));
+    quotas.forEach(q => { q.floor = Math.floor(q.exact); q.rem = q.exact - q.floor; });
+    let assigned = quotas.reduce((s, q) => s + q.floor, 0);
+    let leftover = score - assigned; // сколько целых очков ещё раздать
+    // раздаём остаток по убыванию дробной части (largest remainder)
+    [...quotas].sort((a, b) => b.rem - a.rem).forEach(q => {
+      if (leftover > 0) { q.floor += 1; leftover -= 1; }
+    });
+    shap = quotas
+      .map(q => ({ ...q.t, contribution: q.floor }))
+      .sort((a, b) => b.contribution - a.contribution);
+  }
+
+  // приоритет
+  let priority;
+  if (score >= 80) priority = { lvl:'P1 — Критический', color:'crit', note:'Немедленная ручная проверка следователем' };
+  else if (score >= 55) priority = { lvl:'P2 — Высокий', color:'bad', note:'В очередь на проверку в течение суток' };
+  else if (score >= 30) priority = { lvl:'P3 — Средний', color:'warn', note:'Плановая проверка / накопление сигналов' };
+  else priority = { lvl:'P4 — Низкий', color:'good', note:'Мониторинг без действий' };
+
+  const graphStats = {
+    nodes: nodeArr.length,
+    edges: cs.txs.length,
+    totalVolume: cs.txs.reduce((s,t)=> s+t.amount, 0),
+    hubId: cs.hub,
+    cycle: cyc,
+  };
+
+  return { score, priority, triggers, shap, graphStats, nodes, mitigation };
+}
+
+// рекомендация реагирования по типологии
+const RESPONSE = {
+  smurfing: ['Заблокировать счёт-агрегатор и связанные дроп-карты до выяснения.', 'Запросить у банка идентификацию всех 9+ отправителей (КYC).', 'Проверить связь хаба с известными телеграм-казино (мандат АФМ: онлайн-казино).'],
+  cycle: ['Наложить временный арест на все 4 счёта цикла.', 'Истребовать договоры-основания платежей (их, вероятно, нет).', 'Передать в разработку как layering-схему (ст. отмывание).'],
+  drop_card: ['Срочно заморозить дроп-карту и приостановить CASH-OUT.', 'Поднять записи банкоматов (видео/геолокация) 3 городов.', 'Установить личность отправителя — возможна жертва мошенничества.'],
+  ponzi: ['Зафиксировать счёт «проекта» как ядро финансовой пирамиды.', 'Уведомить АРРФР; собрать список вкладчиков-потерпевших.', 'Проверить рекламу «300% в месяц» (мандат: фин. пирамиды).'],
+  fake_charity: ['Заблокировать карту сбора и шлюз на крипто-обменник.', 'Проверить регистрацию «фонда» и целевое расходование.', 'Связать с ранее помеченным крипто-кейсом (общий бенефициар).'],
+  shell: ['Запросить налоговую отчётность 3 ТОО (ожидается нулёвка).', 'Проверить дату регистрации и единый юр. адрес/учредителя.', 'Квалифицировать как фиктивный транзит без хоз. смысла.'],
+  crypto: ['Запросить у банка данные по 6 крипто-шлюзам.', 'Связать с известной сетью (шлюз ранее помечен).', 'Оценить связь с биржевыми кейсами (типа RAKS).'],
+  legit: ['Действий не требуется. Снять из очереди алертов.', 'Сохранить как negative-пример для калибровки модели.'],
+};
+
+/* ---------------------------------------------------------------------
+   ГЕНЕРАЦИЯ ЧЕРНОВИКА ОБОСНОВАНИЯ (SAR-нарратив)
+   Mock: детерминированный шаблон из триггеров.
+   Опционально: реальный вызов Claude если введён ключ.
+   --------------------------------------------------------------------- */
+function mockSAR(cs, res) {
+  const trg = res.triggers.filter(t=>t.weight>0).map(t=>`• ${t.label}: ${t.detail}`).join('\n');
+  const recs = (RESPONSE[cs.typology]||[]).map((r,i)=>`${i+1}. ${r}`).join('\n');
+  return `ЧЕРНОВИК ОБОСНОВАНИЯ ПОДОЗРЕНИЯ (STR/SAR) — ${cs.id}
+Дата формирования: 2026-06-13 | Сформировано автоматически, требует проверки аналитиком.
+
+1. КРАТКО. По счёту/кластеру «${cs.hub}» (канал: ${cs.channel}) выявлены признаки операции, подпадающей под подозрение в отмывании денежных средств. Присвоен risk-score ${res.score}/100, приоритет ${res.priority.lvl}. Типология: ${cs.title}.
+
+2. ФАКТИЧЕСКИЕ ОБСТОЯТЕЛЬСТВА. ${cs.facts}
+
+3. ВЫЯВЛЕННЫЕ ПРИЗНАКИ (триггеры детект-движка):
+${trg}
+
+4. ГРАФ ОПЕРАЦИЙ. В кластере ${res.graphStats.nodes} счетов, ${res.graphStats.edges} операций, совокупный оборот ${fmt(res.graphStats.totalVolume)} ₸. Хаб: ${res.graphStats.hubId}.${res.graphStats.cycle ? ' Обнаружен замкнутый цикл переводов.' : ''}
+
+5. РЕКОМЕНДАЦИИ ПО РЕАГИРОВАНИЮ:
+${recs}
+
+Примечание: документ — машинный черновик для ускорения работы следователя АФМ. Не является процессуальным решением. Все данные в прототипе синтетические.`;
+}
+
+async function claudeSAR(cs, res, apiKey) {
+  const sys = `Ты — аналитик финансовой разведки (АФМ РК). Составь сжатый, формальный черновик «обоснования подозрения» (SAR/STR-нарратив) на русском языке по предоставленным данным детект-движка. Структура: краткое резюме, фактические обстоятельства, выявленные признаки, рекомендации по реагированию. Без воды, юридически-нейтральный тон, не выдумывай фактов сверх данных. Это синтетические данные для прототипа.`;
+  const user = `Кейс ${cs.id}. Типология: ${cs.title}. Канал: ${cs.channel}.
+Факты: ${cs.facts}
+Risk-score: ${res.score}/100, приоритет ${res.priority.lvl}.
+Триггеры:\n${res.triggers.filter(t=>t.weight>0).map(t=>`- ${t.label}: ${t.detail}`).join('\n')}
+Граф: ${res.graphStats.nodes} счетов, ${res.graphStats.edges} операций, оборот ${fmt(res.graphStats.totalVolume)} ₸.`;
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1100,
+      system: sys,
+      messages: [{ role:'user', content: user }],
+    }),
+  });
+  if (!r.ok) throw new Error('API ' + r.status + ': ' + (await r.text()).slice(0,200));
+  const j = await r.json();
+  return j.content?.map(c=>c.text).join('') || '(пустой ответ)';
+}
+
+/* ---------------------------------------------------------------------
+   ГРАФ-ВИЗУАЛИЗАЦИЯ (SVG, без внешних либ) — layout по ролям
+   --------------------------------------------------------------------- */
+function GraphView({ cs, res }) {
+  const W = 560, H = 360;
+  const nodes = res.nodes;
+  const ids = Object.keys(nodes);
+  // layout: hub в центре; источники слева, получатели справа; цикл — по кругу
+  const hub = cs.hub;
+  const positions = {};
+  if (res.graphStats.cycle) {
+    // круг
+    const cyNodes = ids;
+    cyNodes.forEach((id, i) => {
+      const ang = (i / cyNodes.length) * Math.PI * 2 - Math.PI/2;
+      positions[id] = { x: W/2 + Math.cos(ang)*150, y: H/2 + Math.sin(ang)*120 };
+    });
+  } else {
+    const sources = ids.filter(id => nodes[id].outDeg > 0 && nodes[id].inDeg === 0);
+    const sinks   = ids.filter(id => nodes[id].inDeg > 0 && nodes[id].outDeg === 0 && id !== hub);
+    const mids    = ids.filter(id => id !== hub && !sources.includes(id) && !sinks.includes(id));
+    positions[hub] = { x: W/2, y: H/2 };
+    // place: одна колонка при ≤6 узлах; при большем — две колонки (читаемо на проекторе)
+    const place = (arr, xBase, dir) => {
+      const cols = arr.length > 6 ? 2 : 1;
+      const perCol = Math.ceil(arr.length / cols);
+      arr.forEach((id, i) => {
+        const col = Math.floor(i / perCol);
+        const row = i % perCol;
+        const n = Math.min(perCol, arr.length);
+        const gap = (H - 60) / Math.max(1, n);
+        // вторая колонка ближе к хабу (dir: -1 источники слева, +1 получатели справа)
+        const x = xBase + (col * 48 * dir);
+        positions[id] = { x, y: 40 + gap * row + gap / 2 };
+      });
+    };
+    place(sources, 64, +1);                 // источники слева, 2-я колонка сдвигается правее (к центру)
+    mids.forEach((id,i)=> positions[id] = { x: W/2 + (i%2?120:-120), y: 60 + i*46 });
+    place(sinks, W-64, -1);                  // получатели справа, 2-я колонка левее (к центру)
+    if (!positions[hub]) positions[hub] = {x:W/2,y:H/2};
+  }
+  ids.forEach(id => { if(!positions[id]) positions[id] = { x: 40+Math.random()*(W-80), y: 40+Math.random()*(H-80) }; });
+
+  const cycleEdgeSet = new Set();
+  if (res.graphStats.cycle) {
+    const c = res.graphStats.cycle;
+    for (let i=0;i<c.length-1;i++) cycleEdgeSet.add(c[i]+'>'+c[i+1]);
+  }
+
+  const colorFor = (id) => {
+    const n = nodes[id];
+    if (id === hub) return '#dc2626';
+    if (n.tags?.includes('drop_card') || n.tags?.includes('shell_company')) return '#f59e0b';
+    if (n.tags?.includes('crypto_gateway') || n.tags?.includes('cash_out')) return '#a855f7';
+    if (cs.typology==='legit') return '#22c55e';
+    return '#3b82f6';
+  };
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded-lg" style={{background:'#0b0f1a', border:'1px solid #26324a'}}>
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#64748b" />
+        </marker>
+        <marker id="arrC" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#dc2626" />
+        </marker>
+      </defs>
+      {cs.txs.map((t,i)=> {
+        const a = positions[t.from], b = positions[t.to];
+        if(!a||!b) return null;
+        const isCyc = cycleEdgeSet.has(t.from+'>'+t.to);
+        return (
+          <g key={i}>
+            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke={isCyc?'#dc2626':'#3a4a66'} strokeWidth={isCyc?2.2:1.3}
+              markerEnd={isCyc?'url(#arrC)':'url(#arr)'} opacity="0.85" />
+          </g>
+        );
+      })}
+      {ids.map(id => {
+        const p = positions[id]; const n = nodes[id];
+        const r = id===hub ? 18 : 11;        // крупнее для читаемости на проекторе
+        return (
+          <g key={id}>
+            <circle cx={p.x} cy={p.y} r={r} fill={colorFor(id)} stroke="#0b0f1a" strokeWidth="2">
+              {id===hub && <animate attributeName="opacity" values="1;0.5;1" dur="1.8s" repeatCount="indefinite"/>}
+            </circle>
+            <text x={p.x} y={p.y - r - 4} textAnchor="middle" fill="#cbd5e1" fontSize="12" fontFamily="monospace" fontWeight="600">{id}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ---------------------------------------------------------------------
+   КОМПОНЕНТЫ UI
+   --------------------------------------------------------------------- */
+const SEV = { crit:'#dc2626', bad:'#ef4444', warn:'#f59e0b', good:'#22c55e' };
+
+function ScoreRing({ score, color }) {
+  const R = 34, C = 2*Math.PI*R;
+  const off = C * (1 - score/100);
+  const col = SEV[color] || '#3b82f6';
+  return (
+    <div className="relative" style={{width:84,height:84}}>
+      <svg width="84" height="84" className="-rotate-90">
+        <circle cx="42" cy="42" r={R} stroke="#26324a" strokeWidth="7" fill="none"/>
+        <circle cx="42" cy="42" r={R} stroke={col} strokeWidth="7" fill="none"
+          strokeDasharray={C} strokeDashoffset={off} strokeLinecap="round"
+          style={{transition:'stroke-dashoffset .6s ease'}}/>
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-xl font-bold" style={{color:col}}>{score}</span>
+        <span className="text-[9px] text-slate-400">из 100</span>
+      </div>
+    </div>
+  );
+}
+
+function Tag({ children, sev='warn' }) {
+  const c = SEV[sev];
+  return <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{background:c+'22', color:c, border:'1px solid '+c+'55'}}>{children}</span>;
+}
+
+function App() {
+  const analyzed = useMemo(()=> CASES.map(c => ({ cs:c, res:analyze(c) })), []);
+  // сортировка очереди по убыванию score (приоритизация)
+  const queue = useMemo(()=> [...analyzed].sort((a,b)=> b.res.score - a.res.score), [analyzed]);
+  const [selId, setSelId] = useState(queue[0].cs.id);
+  const sel = analyzed.find(a => a.cs.id === selId);
+  const [alertThreshold, setAlertThreshold] = useState(55); // what-if: порог тревоги (жюри двигает сам)
+
+  const [apiKey, setApiKey] = useState('');
+  const [sarText, setSarText] = useState('');
+  const [sarLoading, setSarLoading] = useState(false);
+  const [sarMode, setSarMode] = useState('');
+
+  useEffect(()=> { setSarText(''); setSarMode(''); }, [selId]);
+
+  // метрики корпуса для жюри: confusion-matrix на ground-truth + recall@top-N + снижение тревог.
+  // Всё пересчитывается под порог тревоги alertThreshold (what-if — жюри двигает ползунок).
+  const corpusMetrics = useMemo(()=> {
+    const total = analyzed.length;
+    const illicit = analyzed.filter(a => isIllicit(a.cs)).length;
+    const benign = total - illicit;
+    let TP=0, FP=0, FN=0, TN=0;
+    analyzed.forEach(a => {
+      const flagged = a.res.score >= alertThreshold;
+      const bad = isIllicit(a.cs);
+      if (flagged && bad) TP++; else if (flagged && !bad) FP++;
+      else if (!flagged && bad) FN++; else TN++;
+    });
+    const precision = (TP+FP) ? TP/(TP+FP) : 1;
+    const recall = (TP+FN) ? TP/(TP+FN) : 1;
+    const f1 = (precision+recall) ? 2*precision*recall/(precision+recall) : 0;
+    const accuracy = total ? (TP+TN)/total : 0;
+    const alertsShown = TP+FP;
+    const ranked = [...analyzed].sort((a,b)=> b.res.score - a.res.score);
+    const hitsTopN = ranked.slice(0, illicit).filter(a => isIllicit(a.cs)).length;
+    const recallTopN = illicit ? Math.round((hitsTopN/illicit)*100) : 100;
+
+    // --- AUPRC (area under precision-recall curve) на ранжировании score корпуса ---
+    // Считаем честно по 9 точкам: идём по порогу сверху вниз, на каждом TP накапливаем
+    // precision×Δrecall (интерполяция прямоугольниками). Не accuracy — при дисбалансе ~0.1%
+    // accuracy бесполезна (пустышка = 99.9%). Стандарт по обзору 97 AML-статей: AUC-PR.
+    let auprc = 0;
+    if (illicit) {
+      let tp = 0, fp = 0, prevRecall = 0;
+      ranked.forEach(a => {
+        if (isIllicit(a.cs)) tp++; else fp++;
+        const rec = tp / illicit;
+        const prec = (tp + fp) ? tp / (tp + fp) : 1;
+        auprc += prec * (rec - prevRecall); // прямоугольник precision на шаге recall
+        prevRecall = rec;
+      });
+    } else { auprc = 1; }
+
+    // --- ЧЕСТНЫЙ наивный baseline на ТОМ ЖЕ корпусе ---
+    // Легаси rule-based система: флагает кластер, если ≥5 операций ИЛИ есть операция выше
+    // порога обязательного контроля. Такое правило срабатывает широко (включая легит —
+    // отсюда индустриальные ~95% ложных алертов). Сравниваем наш scored+порог с ним.
+    const naiveAlerts = analyzed.filter(a =>
+      a.cs.txs.length >= 5 || a.cs.txs.some(t => t.amount > THRESHOLD_CONTROL)
+    ).length;
+    const reduction = naiveAlerts ? Math.max(0, Math.round((1 - alertsShown/naiveAlerts)*100)) : 0;
+    return { total, illicit, benign, TP, FP, FN, TN, precision, recall, f1, accuracy, alertsShown, recallTopN, naiveAlerts, reduction, auprc };
+  }, [analyzed, alertThreshold]);
+
+  const genSAR = async () => {
+    if (apiKey.trim()) {
+      setSarLoading(true); setSarMode('claude');
+      try {
+        const t = await claudeSAR(sel.cs, sel.res, apiKey.trim());
+        setSarText(t);
+      } catch (e) {
+        setSarText('Ошибка вызова Claude API: ' + e.message + '\n\n--- Показан mock-черновик ---\n\n' + mockSAR(sel.cs, sel.res));
+        setSarMode('mock');
+      } finally { setSarLoading(false); }
+    } else {
+      setSarMode('mock');
+      setSarText(mockSAR(sel.cs, sel.res));
+    }
+  };
+
+  return (
+    <div className="min-h-full flex flex-col">
+      {/* HEADER */}
+      <header className="border-b border-edge bg-panel px-5 py-3 flex items-center justify-between sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center text-lg" style={{background:'linear-gradient(135deg,#1d4ed8,#dc2626)'}}>🛡️</div>
+          <div>
+            <h1 className="font-bold text-sm tracking-wide">AI SHIELD <span className="text-slate-400 font-normal">— финансовый щит</span></h1>
+            <p className="text-[11px] text-slate-500">Детект отмывания · граф-аналитика · объяснимость · приоритизация для следователя АФМ</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4 text-[11px]">
+          <span className="flex items-center gap-1.5 text-good"><span className="w-1.5 h-1.5 rounded-full bg-good pulse-dot"></span>Поток активен (синтетика)</span>
+          <span className="text-slate-500 font-mono">AFM AI Hackathon 2026 · трек ai-shield</span>
+        </div>
+      </header>
+
+      {/* METRICS BAR (слайд жюри) */}
+      <div className="bg-panel2 border-b border-edge px-5 py-2.5 flex flex-wrap gap-x-7 gap-y-1 text-[12px]">
+        <Metric label="Алертов в очереди" val={corpusMetrics.total} />
+        <Metric label="Реальных схем" val={`${corpusMetrics.illicit} типологий`} />
+        <Metric label={`Recall@top-${corpusMetrics.illicit}`} val={`${corpusMetrics.recallTopN}%`} good />
+        <Metric label="AUPRC (ранжирование)" val={corpusMetrics.auprc.toFixed(3)} good />
+        <Metric label="Снижение vs наивное правило" val={`${corpusMetrics.reduction > 0 ? '−' : ''}${corpusMetrics.reduction}% (${corpusMetrics.alertsShown} из ${corpusMetrics.naiveAlerts})`} good />
+        <Metric label="Метрика качества" val="AUPRC + recall@top-N, НЕ accuracy" warn title="При доле отмывания ~0.1% классификатор-пустышка даёт 99.9% accuracy и ловит ноль — поэтому меряем AUPRC и recall@top-N." />
+      </div>
+
+      <ValidationBar threshold={alertThreshold} setThreshold={setAlertThreshold} m={corpusMetrics} />
+
+      <div className="flex-1 grid grid-cols-12 gap-0 min-h-0">
+        {/* ОЧЕРЕДЬ АЛЕРТОВ */}
+        <aside className="col-span-3 border-r border-edge bg-panel overflow-y-auto">
+          <div className="px-4 py-2.5 text-[11px] uppercase tracking-wider text-slate-500 border-b border-edge sticky top-0 bg-panel">
+            Приоритизированная очередь
+          </div>
+          {queue.map(({cs,res}) => {
+            const suppressed = res.score < alertThreshold;
+            return (
+            <button key={cs.id} onClick={()=>setSelId(cs.id)}
+              className={`w-full text-left px-4 py-3 border-b border-edge/60 transition fade-in ${selId===cs.id?'bg-panel2':'hover:bg-panel2/50'} ${suppressed?'opacity-45':''}`}
+              style={selId===cs.id?{borderLeft:'3px solid '+SEV[res.priority.color]}:{borderLeft:'3px solid transparent'}}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-mono text-[11px] text-slate-400">{cs.id}</span>
+                <span className="font-bold text-[16px]" style={{color:SEV[res.priority.color]}}>{res.score}</span>
+              </div>
+              <div className="text-[12px] leading-snug mb-1.5 text-slate-200">{cs.title}</div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Tag sev={res.priority.color}>{res.priority.lvl.split(' ')[0]}</Tag>
+                {suppressed
+                  ? <span className="text-[10px] text-slate-500 font-mono">⤓ подавлено (&lt; порога)</span>
+                  : <span className="text-[10px] text-slate-500">{cs.channel.split(' ').slice(0,2).join(' ')}…</span>}
+              </div>
+            </button>
+            );
+          })}
+          <div className="px-4 py-3 text-[10px] text-slate-600 leading-relaxed">
+            Очередь отсортирована по risk-score. Следователь работает сверху вниз — самое опасное первым.
+          </div>
+        </aside>
+
+        {/* DETAIL */}
+        <main className="col-span-9 overflow-y-auto p-5">
+          {sel && <Detail key={sel.cs.id} cs={sel.cs} res={sel.res}
+            apiKey={apiKey} setApiKey={setApiKey} onSelect={setSelId}
+            sarText={sarText} sarLoading={sarLoading} sarMode={sarMode} genSAR={genSAR} setSarText={setSarText} />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function ConfCell({ label, val, color }) {
+  return (
+    <div className="rounded-lg px-2.5 py-1.5 text-center border min-w-[64px]" style={{ borderColor: color + '55', background: color + '11' }}>
+      <div className="font-mono font-bold text-lg leading-none" style={{ color }}>{val}</div>
+      <div className="text-[11px] text-slate-400 leading-tight mt-0.5">{label}</div>
+    </div>
+  );
+}
+function ValMetric({ label, value, color, dim }) {
+  return (
+    <div className="text-center">
+      <div className="font-mono font-bold text-[18px] leading-tight" style={{ color }}>{value}</div>
+      <div className={`text-[10px] uppercase ${dim ? 'text-slate-600' : 'text-slate-500'}`}>{label}</div>
+    </div>
+  );
+}
+function ValidationBar({ threshold, setThreshold, m }) {
+  const pct = v => Math.round(v * 100) + '%';
+  const f1col = m.f1 >= 0.99 ? '#22c55e' : m.f1 >= 0.8 ? '#f59e0b' : '#ef4444';
+  return (
+    <div className="bg-panel border-b border-edge px-5 py-3">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <div className="flex-1 min-w-[280px]">
+          <div className="flex items-center justify-between text-[11px] mb-1">
+            <span className="uppercase tracking-wider text-slate-500">What-if · порог тревоги (score ≥)</span>
+            <span className="font-mono text-accent">≥ {threshold}</span>
+          </div>
+          <input type="range" min="0" max="100" value={threshold} onChange={e => setThreshold(+e.target.value)} className="w-full accent-blue-500" />
+          <div className="flex justify-between text-[9px] text-slate-600 mt-0.5">
+            <span>0 · всё в тревоги (FP↑)</span><span>55 · баланс</span><span>100 · молчим (FN↑)</span>
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">
+            Следователю показано <span className="text-slate-300 font-mono">{m.alertsShown}</span> из {m.total} кластеров (ниже порога — подавлено, экономим время аналитика).
+            Метрики на синтетическом ground-truth: {m.illicit} реальных схем / {m.benign} легит.
+          </p>
+          <p className="text-[10px] text-warn/90 mt-1 leading-snug">
+            ⚠ При доле отмывания ~0.1% классификатор-пустышка даёт 99.9% accuracy и ловит ноль — поэтому меряем AUPRC и recall@top-N, а не accuracy. На синтетике результаты «overly optimistic»: реальные отмыватели маскируются под норму (Elliptic).
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <ConfCell label="поймано TP" val={m.TP} color="#22c55e" />
+          <ConfCell label="лож. тревоги FP" val={m.FP} color="#ef4444" />
+          <ConfCell label="пропуски FN" val={m.FN} color="#f59e0b" />
+          <ConfCell label="верно сняты TN" val={m.TN} color="#3b82f6" />
+        </div>
+        <div className="flex items-center gap-4 pl-4 border-l border-edge">
+          <ValMetric label="Precision" value={pct(m.precision)} color={m.precision >= 0.99 ? '#22c55e' : '#f59e0b'} />
+          <ValMetric label="Recall" value={pct(m.recall)} color={m.recall >= 0.99 ? '#22c55e' : '#f59e0b'} />
+          <ValMetric label="F1" value={pct(m.f1)} color={f1col} />
+          <ValMetric label="accuracy ⚠" value={pct(m.accuracy)} color="#64748b" dim />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, val, good, warn, title }) {
+  const col = good ? '#22c55e' : warn ? '#f59e0b' : '#e5e9f0';
+  return (
+    <div className="flex flex-col" title={title} style={title ? {cursor:'help'} : undefined}>
+      <span className="text-slate-500">{label}{title ? ' ⓘ' : ''}</span>
+      <span className="font-mono font-semibold text-[14px]" style={{color:col}}>{val}</span>
+    </div>
+  );
+}
+
+function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genSAR, onSelect }) {
+  const related = relatedCases(cs);
+  return (
+    <div className="fade-in space-y-4">
+      {/* HEAD */}
+      <div className="flex items-start justify-between gap-4 bg-panel rounded-xl border border-edge p-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="font-mono text-xs text-slate-400">{cs.id}</span>
+            <Tag sev={res.priority.color}>{res.priority.lvl}</Tag>
+          </div>
+          <h2 className="text-lg font-bold mb-1">{cs.title}</h2>
+          <p className="text-[12px] text-slate-400 mb-2">Канал поступления сигнала: <span className="text-slate-300">{cs.channel}</span></p>
+          <p className="text-[13px] text-slate-300 leading-relaxed">{cs.facts}</p>
+          {cs.source && (
+            <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+              <span className="text-slate-400 font-semibold">Источник типологии:</span> {cs.source}
+            </p>
+          )}
+          {related.length > 0 && (
+            <div className="mt-2.5 flex items-center gap-2 flex-wrap text-[11px]">
+              <span className="text-slate-500 uppercase tracking-wider text-[10px]">Связанные кейсы:</span>
+              {related.map(rc => (
+                <button key={rc.id} onClick={()=> onSelect && onSelect(rc.id)}
+                  title={rc.title}
+                  className="font-mono rounded px-2 py-0.5 transition hover:brightness-125"
+                  style={{ background:'#a855f722', color:'#c084fc', border:'1px solid #a855f755' }}>
+                  ⇄ {rc.id} · общий крипто-шлюз
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] mt-2" style={{color:SEV[res.priority.color]}}>▸ {res.priority.note}</p>
+        </div>
+        <div className="flex flex-col items-center gap-1 shrink-0">
+          <ScoreRing score={res.score} color={res.priority.color} />
+          <span className="text-[10px] text-slate-500">risk-score</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        {/* ГРАФ */}
+        <div className="bg-panel rounded-xl border border-edge p-4">
+          <h3 className="text-[12px] uppercase tracking-wider text-slate-500 mb-2">Граф кластера операций</h3>
+          <GraphView cs={cs} res={res} />
+          <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-slate-400">
+            <Legend c="#dc2626" t="хаб (центр схемы)" />
+            <Legend c="#f59e0b" t="дроп / фирма-однодневка" />
+            <Legend c="#a855f7" t="крипто / обнал" />
+            <Legend c="#3b82f6" t="участник" />
+          </div>
+          <div className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+            <Stat k="Счетов" v={res.graphStats.nodes} />
+            <Stat k="Операций" v={res.graphStats.edges} />
+            <Stat k="Оборот, ₸" v={fmt(res.graphStats.totalVolume)} />
+          </div>
+        </div>
+
+        {/* SHAP / ОБЪЯСНИМОСТЬ */}
+        <div className="bg-panel rounded-xl border border-edge p-4">
+          <h3 className="text-[12px] uppercase tracking-wider text-slate-500 mb-1">Почему помечено — вклад факторов</h3>
+          <p className="text-[10px] text-slate-600 mb-3">SHAP-подобная аддитивная декомпозиция (сумма вкладов = score): какой триггер сколько добавил. Объяснимость каждого алерта = регуляторное требование (EU AI Act: AML-модели = high-risk, нужны трассируемые логи).</p>
+          <div className="space-y-2.5">
+            {res.shap.length === 0 && <p className="text-[12px] text-good">Аномалий не выявлено — ложная тревога не сформирована.</p>}
+            {res.shap.map((s,i)=> (
+              <div key={i} className="fade-in">
+                <div className="flex items-center justify-between text-[12px] mb-0.5">
+                  <span className="flex items-center gap-1.5">
+                    <Tag sev={s.severity}>{s.code}</Tag>
+                    <span className="text-slate-200">{s.label}</span>
+                  </span>
+                  <span className="font-mono font-bold text-[16px]" style={{color:SEV[s.severity]}}>+{s.contribution}</span>
+                </div>
+                <div className="w-full h-1.5 rounded bg-edge overflow-hidden">
+                  <div className="h-full rounded" style={{width:`${Math.min(100,s.contribution/Math.max(1,res.score)*100)}%`, background:SEV[s.severity], transition:'width .5s'}}></div>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1 leading-snug">{s.detail}</p>
+              </div>
+            ))}
+            {res.mitigation && (
+              <div className="mt-1 flex items-start gap-2 text-[11px] rounded-lg p-2 border" style={{ borderColor: '#22c55e55', background: '#22c55e11' }}>
+                <span className="text-good font-mono whitespace-nowrap font-semibold">− контекст</span>
+                <span className="text-slate-300">{res.mitigation.note} Итоговый риск ×{res.mitigation.factor}.</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* РЕКОМЕНДАЦИИ */}
+      <div className="bg-panel rounded-xl border border-edge p-4">
+        <h3 className="text-[12px] uppercase tracking-wider text-slate-500 mb-2">Рекомендация по реагированию</h3>
+        <ul className="space-y-1.5">
+          {(RESPONSE[cs.typology]||[]).map((r,i)=> (
+            <li key={i} className="text-[13px] text-slate-300 flex gap-2">
+              <span className="text-accent font-mono">{i+1}.</span><span>{r}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* SAR ГЕНЕРАЦИЯ */}
+      <div className="bg-panel rounded-xl border border-edge p-4">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <h3 className="text-[12px] uppercase tracking-wider text-slate-500">Черновик обоснования подозрения (SAR/STR)</h3>
+          <div className="flex items-center gap-2">
+            <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+              placeholder="Anthropic API-ключ (опц.) — иначе mock"
+              className="text-[11px] bg-ink border border-edge rounded px-2 py-1 w-64 font-mono focus:border-accent outline-none" />
+            <button onClick={genSAR} disabled={sarLoading}
+              className="text-[12px] font-semibold bg-accent hover:bg-blue-600 disabled:opacity-50 rounded px-3 py-1.5 transition">
+              {sarLoading ? 'Генерация…' : '▸ Сформировать черновик'}
+            </button>
+          </div>
+        </div>
+        {sarMode && <p className="text-[10px] mb-2" style={{color: sarMode==='claude'?'#22c55e':'#f59e0b'}}>
+          {sarMode==='claude' ? '● Сгенерировано через Claude (claude-sonnet-4-6)' : '● Mock-режим (детерминированный шаблон, без сети)'}
+        </p>}
+        {sarText
+          ? <pre className="text-[11.5px] text-slate-300 whitespace-pre-wrap leading-relaxed bg-ink rounded-lg p-3 border border-edge font-mono fade-in">{sarText}</pre>
+          : <p className="text-[12px] text-slate-600">Нажмите «Сформировать черновик» — движок соберёт нарратив из триггеров (mock) или вызовет Claude, если введён ключ.</p>}
+      </div>
+
+      <p className="text-[10px] text-slate-600 text-center pb-3">⚠ Все данные синтетические. Прототип для AFM AI Hackathon 2026. Не является процессуальным решением.</p>
+    </div>
+  );
+}
+
+function Legend({ c, t }) {
+  return <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full" style={{background:c}}></span>{t}</span>;
+}
+function Stat({ k, v }) {
+  return <div className="bg-ink rounded p-2 border border-edge"><div className="text-[9px] text-slate-500">{k}</div><div className="font-mono text-slate-200">{v}</div></div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
