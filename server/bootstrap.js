@@ -4,19 +4,14 @@
 // seed dataset once per warm instance. Idempotent: if an active seed dataset is
 // already present, it is a no-op. Safe to call on every request (cheap check).
 
-const { db } = require('./db');
+const store = require('./store');
 
 let _seeded = false;
 
 function hasSeedDataset() {
   try {
-    const row = db
-      .prepare("SELECT id FROM datasets WHERE source='seed' ORDER BY created_at DESC LIMIT 1")
-      .get();
-    return !!row;
+    return store.hasSeed();
   } catch (e) {
-    // table may not exist yet on a brand-new DB — schema is applied in db.js on
-    // require, but guard anyway.
     return false;
   }
 }

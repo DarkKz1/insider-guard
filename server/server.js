@@ -5,7 +5,7 @@
 const path = require('path');
 const express = require('express');
 const pkg = require('../package.json');
-const { db } = require('./db');
+const store = require('./store');
 const { ensureSeed } = require('./bootstrap');
 
 const ingestRoutes = require('./routes/ingest.routes');
@@ -47,11 +47,11 @@ app.use('/api', (req, res, next) => {
 app.get('/api/health', (req, res) => {
   let dbUp = 'up';
   try {
-    db.prepare('SELECT 1').get();
+    if (!store.isUp()) dbUp = 'down';
   } catch (e) {
     dbUp = 'down';
   }
-  res.json({ ok: dbUp === 'up', db: dbUp, version: pkg.version });
+  res.json({ ok: dbUp === 'up', db: dbUp, store: 'in-memory', version: pkg.version });
 });
 
 // --- API routes ---

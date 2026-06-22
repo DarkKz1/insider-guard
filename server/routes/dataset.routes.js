@@ -1,6 +1,6 @@
 'use strict';
 const express = require('express');
-const { db, prep } = require('../db');
+const store = require('../store');
 const { resolveDataset, listDatasets, datasetDetail } = require('../queries');
 
 const router = express.Router();
@@ -19,13 +19,8 @@ router.get('/dataset', (req, res) => {
 
 // POST /api/dataset/:id/activate
 router.post('/dataset/:id/activate', (req, res) => {
-  const d = prep('SELECT id FROM datasets WHERE id=?').get(req.params.id);
-  if (!d) return res.status(404).json({ error: 'датасет не найден' });
-  const tx = db.transaction(() => {
-    prep('UPDATE datasets SET active=0').run();
-    prep('UPDATE datasets SET active=1 WHERE id=?').run(req.params.id);
-  });
-  tx();
+  const ok = store.setActive(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'датасет не найден' });
   res.json({ ok: true, activeId: req.params.id });
 });
 

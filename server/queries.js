@@ -1,22 +1,22 @@
 'use strict';
-// queries.js — read helpers (datasets, incidents, metrics) from SQLite.
+// queries.js — read helpers (datasets, incidents, metrics) from the in-memory
+// store. Same exported signatures + output shapes as the prior SQLite version,
+// so the route layer and frontend contract are unchanged.
 
-const { db, prep } = require('./db');
+const store = require('./store');
 
 function getActiveDataset() {
-  return prep('SELECT * FROM datasets WHERE active=1 ORDER BY created_at DESC LIMIT 1').get();
+  return store.getActiveDataset();
 }
 function getDatasetById(id) {
-  return prep('SELECT * FROM datasets WHERE id=?').get(id);
+  return store.getDatasetById(id);
 }
 function resolveDataset(id) {
-  if (id) return getDatasetById(id);
-  return getActiveDataset() || prep('SELECT * FROM datasets ORDER BY created_at DESC LIMIT 1').get();
+  return store.resolveDataset(id);
 }
 
 function listDatasets() {
-  const rows = prep('SELECT * FROM datasets ORDER BY created_at DESC').all();
-  return rows.map((d) => ({
+  return store.allDatasetsMeta().map((d) => ({
     id: d.id,
     name: d.name,
     source: d.source,
@@ -30,25 +30,28 @@ function listDatasets() {
 }
 
 function datasetSummary(d) {
-  const rows = prep('SELECT priority_color c, COUNT(*) n FROM incidents WHERE dataset_id=? GROUP BY priority_color').all(d.id);
+  const rec = store.getRecord(d.id);
   const summary = { critical: 0, high: 0, medium: 0, low: 0 };
-  for (const r of rows) {
-    if (r.c === 'crit') summary.critical = r.n;
-    else if (r.c === 'bad') summary.high = r.n;
-    else if (r.c === 'warn') summary.medium = r.n;
-    else summary.low = r.n;
+  if (!rec) return summary;
+  for (const inc of rec.incidents) {
+    if (inc.priority.color === 'crit') summary.critical++;
+    else if (inc.priority.color === 'bad') summary.high++;
+    else if (inc.priority.color === 'warn') summary.medium++;
+    else summary.low++;
   }
   return summary;
 }
 
 function datasetDetail(d) {
   const summary = datasetSummary(d);
+  const rec = store.getRecord(d.id);
+  const incs = rec ? rec.incidents : [];
   // heroStat: threats flagged illicit. If ground-truth -> labeled malicious; else score-based (>=55)
   let threats;
   if (d.has_ground_truth) {
-    threats = prep('SELECT COUNT(*) n FROM incidents WHERE dataset_id=? AND label_malicious=1').get(d.id).n;
+    threats = incs.filter((i) => i.label && i.label.malicious).length;
   } else {
-    threats = prep('SELECT COUNT(*) n FROM incidents WHERE dataset_id=? AND score>=55').get(d.id).n;
+    threats = incs.filter((i) => i.score >= 55).length;
   }
   return {
     id: d.id,
@@ -86,39 +89,41 @@ const PRIMARY_TRIGGER_LABEL = {
 };
 
 function listIncidents(d, opts = {}) {
-  const where = ['dataset_id=@ds'];
-  const params = { ds: d.id };
-  if (opts.minScore != null) { where.push('score>=@minScore'); params.minScore = opts.minScore; }
-  if (opts.priority) { where.push('priority_color=@prio'); params.prio = opts.priority; }
-  if (opts.typology) { where.push('typology=@typ'); params.typ = opts.typology; }
+  const rec = store.getRecord(d.id);
+  let incs = rec ? rec.incidents.slice() : [];
+
+  if (opts.minScore != null) incs = incs.filter((i) => i.score >= opts.minScore);
+  if (opts.priority) incs = incs.filter((i) => i.priority.color === opts.priority);
+  if (opts.typology) incs = incs.filter((i) => i.typology === opts.typology);
+
+  // sort by score desc (engine already sorted, but re-sort after filters)
+  incs.sort((a, b) => b.score - a.score);
+
+  const total = incs.length;
   const limit = opts.limit != null ? Math.max(1, Math.min(5000, opts.limit)) : 1000;
   const offset = opts.offset != null ? Math.max(0, opts.offset) : 0;
+  const page = incs.slice(offset, offset + limit);
 
-  const total = prep(`SELECT COUNT(*) n FROM incidents WHERE ${where.join(' AND ')}`).get(params).n;
-  const rows = db
-    .prepare(`SELECT * FROM incidents WHERE ${where.join(' AND ')} ORDER BY score DESC LIMIT ${limit} OFFSET ${offset}`)
-    .all(params);
-
-  const incidents = rows.map((r) => {
-    const top = prep('SELECT code,label FROM incident_factors WHERE incident_id=? ORDER BY rank LIMIT 1').get(r.id);
+  const incidents = page.map((inc) => {
+    const top = (inc.shap && inc.shap[0]) || null;
     const out = {
-      id: r.id,
-      user: r.user,
-      role: r.role,
-      typology: r.typology,
-      title: r.title,
-      channel: r.channel,
-      score: r.score,
-      priority: { lvl: r.priority_lvl, color: r.priority_color, note: r.priority_note },
+      id: inc._id,
+      user: inc.user,
+      role: inc.role ?? null,
+      typology: inc.typology,
+      title: inc.title,
+      channel: inc.channel ?? null,
+      score: Number.isFinite(inc.score) ? inc.score : 0,
+      priority: { lvl: inc.priority.lvl, color: inc.priority.color, note: inc.priority.note },
       primaryTrigger: top
         ? { code: top.code, label: PRIMARY_TRIGGER_LABEL[top.code] || top.label }
         : null,
-      windowDate: r.window_date,
-      rowsTouched: r.rows_touched,
-      eventCount: r.event_count,
+      windowDate: inc.windowDate,
+      rowsTouched: inc.rowsTouched,
+      eventCount: inc.eventCount,
     };
-    if (d.has_ground_truth && r.label_malicious != null) {
-      out.label = { malicious: r.label_malicious === 1, typology: r.label_typology };
+    if (d.has_ground_truth && inc.label != null) {
+      out.label = { malicious: !!inc.label.malicious, typology: inc.label.typology };
     }
     return out;
   });
@@ -127,50 +132,46 @@ function listIncidents(d, opts = {}) {
 }
 
 function incidentDetail(d, id) {
-  const r = prep('SELECT * FROM incidents WHERE dataset_id=? AND id=?').get(d.id, id);
-  if (!r) return null;
-  const factors = prep('SELECT code,label,weight,contribution,detail,severity,rank FROM incident_factors WHERE incident_id=? ORDER BY rank').all(id);
-  const edgeRows = prep('SELECT from_id,to_id,node_kind_from,node_kind_to,action,rows,ts,channel,crit FROM incident_edges WHERE incident_id=? ORDER BY ts').all(id);
-  const graphMeta = JSON.parse(r.graph_json);
-  const baseline = JSON.parse(r.baseline_json);
-  const observed = JSON.parse(r.observed_json);
-  const related = r.related_json ? JSON.parse(r.related_json) : [];
-  const playbook = r.playbook_json ? JSON.parse(r.playbook_json) : [];
+  const rec = store.getRecord(d.id);
+  if (!rec) return null;
+  const inc = rec.incidentsById.get(id);
+  if (!inc) return null;
 
-  const triggers = factors.map((f) => ({
+  const triggers = (inc.triggers || []).map((f) => ({
     code: f.code,
     label: f.label,
     weight: f.weight,
-    detail: f.detail,
-    severity: f.severity,
+    detail: f.detail ?? null,
+    severity: f.severity ?? null,
   }));
-  const shap = factors.map((f) => ({
+  const shap = (inc.shap || []).map((f) => ({
     code: f.code,
     label: f.label,
-    severity: f.severity,
+    severity: f.severity ?? null,
     contribution: f.contribution,
   }));
-  const edges = edgeRows.map((e) => ({
-    from: e.from_id,
-    to: e.to_id,
-    action: e.action,
-    rows: e.rows,
-    ts: e.ts,
-    channel: e.channel,
+  const edges = (inc.graph.edges || []).map((e) => ({
+    from: e.from,
+    to: e.to,
+    action: e.action ?? null,
+    rows: e.rows ?? 0,
+    ts: e.ts ?? null,
+    channel: e.channel ?? null,
     crit: !!e.crit,
   }));
 
+  const baseline = inc.baseline || {};
   const out = {
-    id: r.id,
-    datasetId: r.dataset_id,
-    user: r.user,
-    role: r.role,
-    typology: r.typology,
-    title: r.title,
-    channel: r.channel,
-    windowDate: r.window_date,
-    score: r.score,
-    priority: { lvl: r.priority_lvl, color: r.priority_color, note: r.priority_note },
+    id: inc._id,
+    datasetId: d.id,
+    user: inc.user,
+    role: inc.role ?? null,
+    typology: inc.typology,
+    title: inc.title,
+    channel: inc.channel ?? null,
+    windowDate: inc.windowDate,
+    score: inc.score,
+    priority: { lvl: inc.priority.lvl, color: inc.priority.color, note: inc.priority.note },
     baseline: {
       avg_rows_per_day: baseline.avg_rows_per_day,
       work_hours: baseline.work_hours,
@@ -182,29 +183,34 @@ function incidentDetail(d, id) {
       volume_cv: baseline.volume_cv,
       source: 'computed-from-history',
     },
-    observed,
+    observed: inc.observed,
     triggers,
     shap,
-    mitigation:
-      r.mitigation_factor != null ? { factor: r.mitigation_factor, note: r.mitigation_note } : null,
+    mitigation: inc.mitigation
+      ? { factor: inc.mitigation.factor, note: inc.mitigation.note }
+      : null,
     graph: {
-      nodes: graphMeta.nodes,
+      nodes: inc.graph.nodes,
       edges,
-      hub: graphMeta.hub,
-      cycle: graphMeta.cycle || null,
+      hub: inc.graph.hub,
+      cycle: inc.graph.cycle || null,
     },
-    related,
-    playbook,
+    related: inc._related || [],
+    playbook: inc.playbook || [],
   };
-  if (d.has_ground_truth && r.label_malicious != null) {
-    out.label = { malicious: r.label_malicious === 1, typology: r.label_typology };
+  if (d.has_ground_truth && inc.label != null) {
+    out.label = { malicious: !!inc.label.malicious, typology: inc.label.typology };
   }
   return out;
 }
 
 // METRICS — confusion / precision / recall / f1 / accuracy / AUPRC + naive-DLP,
-// recomputed from stored incident scores+labels at a what-if threshold. No engine rerun.
+// recomputed from stored incident scores+labels at a what-if threshold.
 function metrics(d, threshold = 55) {
+  const rec = store.getRecord(d.id);
+  const incsAll = rec ? rec.incidents : [];
+  const cleansAll = rec ? rec.cleanUserDays : [];
+
   const out = {
     datasetId: d.id,
     hasGroundTruth: !!d.has_ground_truth,
@@ -219,12 +225,17 @@ function metrics(d, threshold = 55) {
     },
   };
 
-  // all scored user-days = incidents (score>0) + clean labeled days (score 0)
-  const incs = prep('SELECT score, label_malicious, event_count FROM incidents WHERE dataset_id=?').all(d.id);
-  const cleans = prep('SELECT label_malicious FROM clean_user_days WHERE dataset_id=?').all(d.id);
+  const incs = incsAll.map((i) => ({
+    score: i.score,
+    label_malicious: i.label ? (i.label.malicious ? 1 : 0) : null,
+    event_count: i.eventCount,
+    rows_touched: i.rowsTouched,
+  }));
+  const cleans = cleansAll.map((c) => ({
+    label_malicious: c.label ? (c.label.malicious ? 1 : 0) : null,
+  }));
 
   if (!d.has_ground_truth) {
-    // no labels — only score distribution + corpus stats
     const dist = { p1: 0, p2: 0, p3: 0, p4: 0 };
     for (const i of incs) {
       if (i.score >= 80) dist.p1++;
@@ -243,7 +254,6 @@ function metrics(d, threshold = 55) {
     return out;
   }
 
-  // labeled corpus: combine
   const labeled = [
     ...incs.filter((i) => i.label_malicious != null).map((i) => ({ score: i.score, bad: i.label_malicious === 1 })),
     ...cleans.filter((c) => c.label_malicious != null).map((c) => ({ score: 0, bad: c.label_malicious === 1 })),
@@ -266,38 +276,29 @@ function metrics(d, threshold = 55) {
   const accuracy = total ? (TP + TN) / total : 0;
   const alertsShown = TP + FP;
 
-  // recall@top-N (N = #illicit): among top-N by score, how many illicit
   const ranked = labeled.slice().sort((a, b) => b.score - a.score);
   const topN = ranked.slice(0, illicit);
   const hitsTopN = topN.filter((x) => x.bad).length;
   const recallTopN = illicit ? Math.round((hitsTopN / illicit) * 100) : 100;
 
-  // AUPRC by score ranking
   let auprc = 0;
   if (illicit) {
     let tp = 0, fp = 0, prevRecall = 0;
     for (const x of ranked) {
       if (x.bad) tp++;
       else fp++;
-      const rec = tp / illicit;
+      const rec2 = tp / illicit;
       const prec = tp + fp ? tp / (tp + fp) : 1;
-      auprc += prec * (rec - prevRecall);
-      prevRecall = rec;
+      auprc += prec * (rec2 - prevRecall);
+      prevRecall = rec2;
     }
   } else auprc = 1;
 
-  // naive perimeter-DLP baseline on the SAME corpus: a crude rule with NO
-  // personal baseline — flag any user-day whose raw read volume >= NAIVE_VOLUME
-  // OR event count >= NAIVE_EVENTS. This is the kind of rule that drowns a SOC
-  // in false positives (it cannot tell a legit large-volume ETL/audit from an
-  // insider) and misses quiet insiders (lateral/priv-esc whose raw numbers are
-  // small). Computed over the labeled user-days we have stats for (the planted
-  // benign hard-negatives surface here as naive FPs — which is the point).
+  // naive perimeter-DLP baseline on the SAME corpus.
   const NAIVE_VOLUME = 30000;
   const NAIVE_EVENTS = 5;
-  const incRich = prep('SELECT rows_touched, event_count, label_malicious FROM incidents WHERE dataset_id=? AND label_malicious IS NOT NULL').all(d.id);
+  const incRich = incs.filter((i) => i.label_malicious != null);
   let naiveTP = 0, naiveFP = 0, naiveFN = 0;
-  // incidents (have activity)
   for (const i of incRich) {
     const flagged = i.rows_touched >= NAIVE_VOLUME || i.event_count >= NAIVE_EVENTS;
     const bad = i.label_malicious === 1;
@@ -305,7 +306,6 @@ function metrics(d, threshold = 55) {
     else if (flagged && !bad) naiveFP++;
     else if (!flagged && bad) naiveFN++;
   }
-  // labeled clean days never trip naive (rows 0, events 0); malicious clean days (none here) would be FN
   for (const c of cleans.filter((c) => c.label_malicious != null)) {
     if (c.label_malicious === 1) naiveFN++;
   }
