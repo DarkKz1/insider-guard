@@ -8,7 +8,7 @@ const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
 
 // POST /api/ingest — multipart file OR application/json { name?, events:[...] }
-router.post('/ingest', upload.single('file'), (req, res) => {
+router.post('/ingest', upload.single('file'), async (req, res) => {
   try {
     let events;
     let hasGroundTruth;
@@ -35,7 +35,10 @@ router.post('/ingest', upload.single('file'), (req, res) => {
 
     if (!events.length) return res.status(400).json({ error: 'лог пуст (0 событий)' });
 
-    const summary = persistDataset({
+    // AWAIT: persistDataset writes the durable snapshot (Supabase upsert) and
+    // only resolves once it's persisted — so the response is sent AFTER the
+    // dataset is safe on disk/Supabase (serverless freeze-after-res safety).
+    const summary = await persistDataset({
       name,
       source: 'upload',
       events,

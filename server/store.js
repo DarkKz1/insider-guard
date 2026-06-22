@@ -1,19 +1,27 @@
 'use strict';
-// store.js — pure-JS data store (NO native modules) with OPTIONAL on-disk
-// persistence. Holds datasets and their computed incidents / clean-user-days /
-// run-meta as plain JS objects, keyed by datasetId.
+// store.js — pure-JS data store (NO native modules) with persistence. Holds
+// datasets and their computed incidents / clean-user-days / run-meta as plain JS
+// objects, keyed by datasetId.
 //
-// Persistence (added for long-lived hosts like Railway with a mounted volume):
-//   - DB_PATH env (default ./data/store.json) points at a JSON snapshot file.
-//   - On first use the store auto-loads that file if it exists (datasets +
-//     active flags survive process restarts). If it does NOT exist, the store
-//     stays empty and bootstrap.js seeds it (which triggers a save).
-//   - Every mutation (putDataset / clearActive / setActive) saves atomically
-//     (write temp + rename) so a crash mid-write never corrupts the snapshot.
-//   - Graceful degradation: on a read-only / ephemeral filesystem (Vercel,
-//     where /tmp or /data is not writable) a failed write is WARNED once and
-//     the store keeps working purely in-memory. The process never crashes on a
-//     persistence error — persistence is best-effort, correctness is in RAM.
+// Persistence backends (priority order):
+//   1. Supabase Postgres  — when SUPABASE_URL + SUPABASE_KEY are set. The ENTIRE
+//      store snapshot is kept as ONE row in public.ig_snapshot (id='main',
+//      data=jsonb). This survives serverless cold-starts / redeploys (Vercel
+//      freezes/discards the per-instance memory between invocations). We use the
+//      Supabase PostgREST API directly via global `fetch` (NOT the
+//      @supabase/supabase-js SDK): the SDK's createClient() builds a Realtime
+//      client that needs a native WebSocket, which throws on Node < 22 (Vercel
+//      pins Node 20) and silently disabled persistence. PostgREST over fetch
+//      needs no WebSocket and no extra deps. Loading is
+//      ASYNC — callers MUST `await ensureLoaded()` before reading the store (an
+//      Express middleware does this per request). Mutations `await saveSnapshot`
+//      so the row is written BEFORE the HTTP response returns (a Vercel instance
+//      may be frozen the instant after res, so a fire-and-forget save can lose).
+//   2. On-disk JSON snapshot (DB_PATH, default ./data/store.json) — local/dev
+//      fallback when Supabase env is NOT set. Atomic write (temp + rename).
+//
+// Graceful degradation: ANY Supabase error -> one warn + continue purely
+// in-memory (never crash). Correctness is in RAM; persistence is best-effort.
 //
 // Engine output (rich incident objects) is stored as-is. The only non-JSON
 // field on a record is `incidentsById` (a Map); it is DROPPED on save and
@@ -34,31 +42,112 @@ const _datasets = new Map();
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'store.json');
 
-let _loaded = false; // have we attempted to load the snapshot yet?
-let _persistDisabled = false; // turned on after a write failure (warn once)
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const SNAPSHOT_ID = 'main';
+const TABLE = 'ig_snapshot';
 
-// --- persistence: load ---------------------------------------------------
+let _loaded = false; // have we attempted to load the snapshot yet?
+let _loadPromise = null; // Promise-once for the async load
+let _persistDisabled = false; // turned on after a write failure (warn once)
+let _warnedLoad = false; // warn-once on a load failure
+
+// --- supabase persistence via PostgREST (native fetch, NO sdk) -----------
+// We talk to Supabase's auto-generated REST API directly with global `fetch`
+// instead of @supabase/supabase-js. The SDK's createClient() instantiates a
+// Realtime client that REQUIRES a native WebSocket; on Node < 22 (Vercel pins
+// Node 20) that throws ("Node.js 20 detected without native WebSocket support"),
+// which silently disabled persistence. PostgREST over fetch needs no WebSocket,
+// no extra deps, and is exactly what the SDK does for table reads/writes.
+
+const supabaseEnabled = () => !!(SUPABASE_URL && SUPABASE_KEY);
+
+const _restBase = () => `${SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/${TABLE}`;
+const _restHeaders = () => ({
+  apikey: SUPABASE_KEY,
+  Authorization: `Bearer ${SUPABASE_KEY}`,
+});
+
+// SELECT data WHERE id='main' (single row). Returns the parsed `data` jsonb or
+// null when the row is absent. Throws on a non-2xx response so the caller's
+// catch can warn-once and fall back.
+async function _restSelectSnapshot() {
+  const url = `${_restBase()}?id=eq.${encodeURIComponent(SNAPSHOT_ID)}&select=data`;
+  const resp = await fetch(url, { headers: { ..._restHeaders(), Accept: 'application/json' } });
+  if (!resp.ok) throw new Error(`PostgREST select ${resp.status} ${resp.statusText}: ${await resp.text()}`);
+  const rows = await resp.json();
+  const row = Array.isArray(rows) ? rows[0] : null;
+  return row && row.data ? row.data : null;
+}
+
+// UPSERT {id:'main', data, updated_at}. PostgREST does an upsert when the body
+// targets the PK and Prefer:resolution=merge-duplicates is set. Throws on
+// non-2xx so the caller can warn-once and continue in-memory.
+async function _restUpsertSnapshot(snapshot) {
+  const resp = await fetch(_restBase(), {
+    method: 'POST',
+    headers: {
+      ..._restHeaders(),
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=minimal',
+    },
+    body: JSON.stringify({ id: SNAPSHOT_ID, data: snapshot, updated_at: new Date().toISOString() }),
+  });
+  if (!resp.ok) throw new Error(`PostgREST upsert ${resp.status} ${resp.statusText}: ${await resp.text()}`);
+  return true;
+}
+
+// --- (de)serialize -------------------------------------------------------
 
 function _rebuildIndex(rec) {
   // incidentsById is derived from incidents (_id). Rebuild it after load so
-  // queries.js (rec.incidentsById.get(id)) works without a SQLite round-trip.
+  // queries.js (rec.incidentsById.get(id)) works without a round-trip.
   rec.incidentsById = new Map((rec.incidents || []).map((inc) => [inc._id, inc]));
   return rec;
 }
 
-function _loadFromDisk() {
-  if (_loaded) return;
-  _loaded = true;
+function _snapshotObject() {
+  // plain-JSON snapshot of the whole store (drop the derived Map).
+  const datasets = [..._datasets.values()].map((rec) => ({
+    meta: rec.meta,
+    incidents: rec.incidents,
+    cleanUserDays: rec.cleanUserDays,
+    runMeta: rec.runMeta,
+  }));
+  return { version: 1, savedAt: new Date().toISOString(), datasets };
+}
+
+function _hydrateFrom(parsed) {
+  const records = Array.isArray(parsed) ? parsed : (parsed && parsed.datasets) || [];
+  _datasets.clear();
+  for (const rec of records) {
+    if (!rec || !rec.meta || !rec.meta.id) continue;
+    _datasets.set(rec.meta.id, _rebuildIndex(rec));
+  }
+}
+
+// --- async load (Supabase first, disk fallback) --------------------------
+
+async function _loadSupabase() {
+  if (!supabaseEnabled()) return false;
+  const data = await _restSelectSnapshot();
+  if (data) {
+    _hydrateFrom(data);
+    // eslint-disable-next-line no-console
+    console.log(`[store] loaded ${_datasets.size} dataset(s) from Supabase (${TABLE}/${SNAPSHOT_ID})`);
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[store] no Supabase snapshot yet — starting empty (bootstrap will seed)`);
+  }
+  return true;
+}
+
+function _loadFromDiskSync() {
   try {
     if (!fs.existsSync(DB_PATH)) return; // no snapshot yet -> stay empty, will seed
     const raw = fs.readFileSync(DB_PATH, 'utf8');
     if (!raw.trim()) return;
-    const parsed = JSON.parse(raw);
-    const records = Array.isArray(parsed) ? parsed : parsed.datasets || [];
-    for (const rec of records) {
-      if (!rec || !rec.meta || !rec.meta.id) continue;
-      _datasets.set(rec.meta.id, _rebuildIndex(rec));
-    }
+    _hydrateFrom(JSON.parse(raw));
     // eslint-disable-next-line no-console
     console.log(`[store] loaded ${_datasets.size} dataset(s) from ${DB_PATH}`);
   } catch (e) {
@@ -69,24 +158,59 @@ function _loadFromDisk() {
   }
 }
 
-// --- persistence: save (atomic, best-effort) -----------------------------
-
-function _serialize() {
-  // strip the derived Map (incidentsById) — it is rebuilt on load.
-  const datasets = [..._datasets.values()].map((rec) => ({
-    meta: rec.meta,
-    incidents: rec.incidents,
-    cleanUserDays: rec.cleanUserDays,
-    runMeta: rec.runMeta,
-  }));
-  return JSON.stringify({ version: 1, savedAt: new Date().toISOString(), datasets });
+/**
+ * ensureLoaded — lazy, idempotent, Promise-once async load. MUST be awaited
+ * before any store read on serverless (Supabase load is async). Express
+ * middleware awaits this per request. On any failure: warn once, stay empty.
+ */
+function ensureLoaded() {
+  if (_loaded) return Promise.resolve();
+  if (_loadPromise) return _loadPromise;
+  _loadPromise = (async () => {
+    try {
+      if (supabaseEnabled()) {
+        const ok = await _loadSupabase();
+        if (!ok) _loadFromDiskSync();
+      } else {
+        _loadFromDiskSync();
+      }
+    } catch (e) {
+      if (!_warnedLoad) {
+        // eslint-disable-next-line no-console
+        console.warn(`[store] load failed (${e.message}) — starting empty, continuing in-memory`);
+        _warnedLoad = true;
+      }
+      _datasets.clear();
+    } finally {
+      _loaded = true;
+    }
+  })();
+  return _loadPromise;
 }
 
-function _saveToDisk() {
-  if (_persistDisabled) return; // already known read-only — skip, stay in-memory
+// Sync best-effort load for any legacy sync read path (local/dev only). On
+// Supabase the load is async-only; sync reads rely on the middleware having
+// awaited ensureLoaded() first.
+function _ensureLoadedSync() {
+  if (_loaded) return;
+  if (supabaseEnabled()) return; // async-only; do NOT block — middleware handles it
+  _loaded = true;
+  _loadFromDiskSync();
+}
+
+// --- async save (Supabase upsert, disk fallback) -------------------------
+
+async function _saveSupabase(snapshot) {
+  if (!supabaseEnabled()) return false;
+  await _restUpsertSnapshot(snapshot);
+  return true;
+}
+
+function _saveToDiskSync(snapshot) {
+  if (_persistDisabled) return;
   let json;
   try {
-    json = _serialize();
+    json = JSON.stringify(snapshot);
   } catch (e) {
     // eslint-disable-next-line no-console
     console.warn(`[store] serialize failed: ${e.message} — running in-memory only`);
@@ -96,14 +220,11 @@ function _saveToDisk() {
   try {
     const dir = path.dirname(DB_PATH);
     fs.mkdirSync(dir, { recursive: true });
-    // atomic: write to a temp file in the SAME dir, then rename over the target.
-    // rename is atomic on POSIX so a crash mid-write cannot truncate the snapshot.
+    // atomic: write temp in the SAME dir, then rename over the target.
     const tmp = path.join(dir, `.store.${process.pid}.${Date.now()}.tmp`);
     fs.writeFileSync(tmp, json);
     fs.renameSync(tmp, DB_PATH);
   } catch (e) {
-    // Read-only / ephemeral FS (e.g. Vercel /data, /var/task). Warn ONCE and
-    // continue purely in-memory — never crash on a persistence failure.
     if (!_persistDisabled) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -114,35 +235,76 @@ function _saveToDisk() {
   }
 }
 
-// --- store API (signatures unchanged from the in-memory-only version) ----
+/**
+ * saveSnapshot — persist the WHOLE store. Returns a Promise that MUST be
+ * awaited by mutating routes BEFORE sending the HTTP response (serverless can
+ * freeze the instance right after res). Any error -> warn once, resolve anyway
+ * (best-effort persistence; never throw into the request path).
+ */
+async function saveSnapshot() {
+  let snapshot;
+  try {
+    snapshot = _snapshotObject();
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[store] snapshot serialize failed: ${e.message} — in-memory only`);
+    return;
+  }
+  if (supabaseEnabled()) {
+    try {
+      await _saveSupabase(snapshot);
+      return;
+    } catch (e) {
+      if (!_persistDisabled) {
+        // eslint-disable-next-line no-console
+        console.warn(`[store] Supabase save failed (${e.message}) — continuing in-memory only`);
+      }
+      _persistDisabled = true;
+      return; // do NOT fall back to disk on a serverless host
+    }
+  }
+  _saveToDiskSync(snapshot);
+}
+
+// --- store API -----------------------------------------------------------
+// Reads are SYNC (RAM). Writes update RAM synchronously and RETURN the
+// saveSnapshot() Promise so callers (persist.js / routes) can `await` the
+// durable write before responding.
 
 function putDataset(rec) {
-  _loadFromDisk();
+  _ensureLoadedSync();
   _datasets.set(rec.meta.id, rec);
-  _saveToDisk();
+  return saveSnapshot();
 }
 
 function clearActive() {
-  _loadFromDisk();
+  _ensureLoadedSync();
   for (const rec of _datasets.values()) rec.meta.active = 0;
-  _saveToDisk();
+  return saveSnapshot();
+}
+
+// RAM-only deactivate (no save). Used by persistDataset before putDataset so a
+// single consistent snapshot is written (avoids two concurrent upserts).
+function deactivateAllInMemory() {
+  _ensureLoadedSync();
+  for (const rec of _datasets.values()) rec.meta.active = 0;
 }
 
 function getActiveDataset() {
-  _loadFromDisk();
+  _ensureLoadedSync();
   const recs = [..._datasets.values()].filter((r) => r.meta.active === 1);
   recs.sort((a, b) => (a.meta.created_at < b.meta.created_at ? 1 : -1));
   return recs[0] ? recs[0].meta : undefined;
 }
 
 function getDatasetById(id) {
-  _loadFromDisk();
+  _ensureLoadedSync();
   const rec = _datasets.get(id);
   return rec ? rec.meta : undefined;
 }
 
 function latestDataset() {
-  _loadFromDisk();
+  _ensureLoadedSync();
   const recs = [..._datasets.values()];
   recs.sort((a, b) => (a.meta.created_at < b.meta.created_at ? 1 : -1));
   return recs[0] ? recs[0].meta : undefined;
@@ -154,29 +316,30 @@ function resolveDataset(id) {
 }
 
 function allDatasetsMeta() {
-  _loadFromDisk();
+  _ensureLoadedSync();
   const recs = [..._datasets.values()];
   recs.sort((a, b) => (a.meta.created_at < b.meta.created_at ? 1 : -1));
   return recs.map((r) => r.meta);
 }
 
 function getRecord(id) {
-  _loadFromDisk();
+  _ensureLoadedSync();
   return _datasets.get(id);
 }
 
 function hasSeed() {
-  _loadFromDisk();
+  _ensureLoadedSync();
   for (const r of _datasets.values()) if (r.meta.source === 'seed') return true;
   return false;
 }
 
 function setActive(id) {
-  _loadFromDisk();
+  _ensureLoadedSync();
   if (!_datasets.has(id)) return false;
   for (const rec of _datasets.values()) rec.meta.active = 0;
   _datasets.get(id).meta.active = 1;
-  _saveToDisk();
+  // fire the durable save; route awaits saveSnapshot() separately for safety.
+  saveSnapshot();
   return true;
 }
 
@@ -185,13 +348,20 @@ function isUp() {
 }
 
 function size() {
-  _loadFromDisk();
+  _ensureLoadedSync();
   return _datasets.size;
 }
 
+function backend() {
+  return supabaseEnabled() ? 'supabase' : 'disk';
+}
+
 module.exports = {
+  ensureLoaded,
+  saveSnapshot,
   putDataset,
   clearActive,
+  deactivateAllInMemory,
   getActiveDataset,
   getDatasetById,
   latestDataset,
@@ -202,5 +372,7 @@ module.exports = {
   setActive,
   isUp,
   size,
+  backend,
+  supabaseEnabled,
   DB_PATH, // exposed for diagnostics
 };

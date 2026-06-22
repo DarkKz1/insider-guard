@@ -30,12 +30,26 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- cold-start seed guard: ensure the demo corpus exists before any API call.
-// On serverless the /tmp DB starts empty on a cold instance; this generates the
-// deterministic seed once per warm instance. Cheap no-op once seeded.
-app.use('/api', (req, res, next) => {
+// --- persistence load guard: GUARANTEE the snapshot is loaded (async, e.g.
+// Supabase) BEFORE any store read in this request. On serverless the per-
+// instance memory is empty on a cold start; this hydrates it from the durable
+// snapshot first. ensureLoaded() is Promise-once (loads at most once per
+// instance) and never throws (warns + stays empty on failure).
+app.use('/api', async (req, res, next) => {
   try {
-    ensureSeed();
+    await store.ensureLoaded();
+  } catch (e) {
+    // ensureLoaded already swallows errors, but be defensive — never block.
+  }
+  next();
+});
+
+// --- cold-start seed guard: ensure the demo corpus exists before any API call.
+// Runs AFTER ensureLoaded so a snapshot restored from Supabase is seen and we
+// do NOT re-seed over it. ensureSeed is async (it awaits the durable save).
+app.use('/api', async (req, res, next) => {
+  try {
+    await ensureSeed();
     next();
   } catch (e) {
     console.error('[bootstrap] seed failed', e);
@@ -51,7 +65,27 @@ app.get('/api/health', (req, res) => {
   } catch (e) {
     dbUp = 'down';
   }
-  res.json({ ok: dbUp === 'up', db: dbUp, store: 'in-memory', version: pkg.version });
+  let backend = 'disk';
+  try {
+    backend = store.backend();
+  } catch (e) {
+    /* noop */
+  }
+  res.json({
+    ok: dbUp === 'up',
+    db: dbUp,
+    store: backend === 'supabase' ? 'supabase-backed' : 'in-memory+disk',
+    backend, // 'supabase' | 'disk'
+    persistent: backend === 'supabase',
+    datasets: (() => {
+      try {
+        return store.size();
+      } catch (e) {
+        return null;
+      }
+    })(),
+    version: pkg.version,
+  });
 });
 
 // --- API routes ---

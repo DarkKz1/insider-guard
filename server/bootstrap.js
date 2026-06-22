@@ -16,7 +16,11 @@ function hasSeedDataset() {
   }
 }
 
-function ensureSeed() {
+// ASYNC: the snapshot load (Supabase) is async and persistDataset awaits the
+// durable save. Callers MUST `await ensureLoaded()` before this (so a snapshot
+// restored from Supabase is seen and we DON'T re-seed over it). The seed
+// middleware in server.js awaits ensureLoaded() then ensureSeed().
+async function ensureSeed() {
   if (_seeded) return;
   if (hasSeedDataset()) {
     _seeded = true;
@@ -33,7 +37,7 @@ function ensureSeed() {
   const allEvents = events.concat(attackEvents);
   allEvents.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 
-  persistDataset({
+  await persistDataset({
     name: 'Корпус-демо (синтетика)',
     source: 'seed',
     events: allEvents,
@@ -43,7 +47,7 @@ function ensureSeed() {
 
   _seeded = true;
   // eslint-disable-next-line no-console
-  console.log('[bootstrap] seed corpus generated (', allEvents.length, 'events )');
+  console.log('[bootstrap] seed corpus generated (', allEvents.length, 'events ) — persisted');
 }
 
 module.exports = { ensureSeed };

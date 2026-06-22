@@ -9,11 +9,13 @@ const store = require('./store');
 const { detect, ENGINE_VERSION } = require('./engine');
 
 /**
- * persistDataset — full pipeline.
+ * persistDataset — full pipeline. ASYNC: awaits the durable snapshot write
+ * (Supabase upsert / atomic disk) so the dataset is persisted BEFORE the caller
+ * responds — critical on serverless where the instance may freeze after res.
  * @param {Object} args { name, source, events, hasGroundTruth, activate }
  * @returns summary object (datasetId, counts, summary, durationMs, incidentCount)
  */
-function persistDataset({ name, source, events, hasGroundTruth, activate = true }) {
+async function persistDataset({ name, source, events, hasGroundTruth, activate = true }) {
   const result = detect(events, {});
   const { incidents, cleanUserDays, meta } = result;
 
@@ -83,9 +85,16 @@ function persistDataset({ name, source, events, hasGroundTruth, activate = true 
     created_at: nowIso,
   };
 
-  if (activate) store.clearActive();
+  // If activating, clear the active flag on every existing dataset in RAM
+  // WITHOUT its own save (deactivateAllInMemory), so putDataset() below writes
+  // ONE consistent snapshot (cleared flags + new active dataset). Avoiding two
+  // concurrent upserts to the same row prevents a stale write landing last.
+  if (activate) store.deactivateAllInMemory();
 
-  store.putDataset({
+  // putDataset() updates RAM and returns the durable-save Promise; await it so
+  // the row is persisted BEFORE the caller responds (serverless freeze-after-res
+  // safety — a fire-and-forget save can be dropped when the instance freezes).
+  await store.putDataset({
     meta: datasetMeta,
     incidents,
     incidentsById: new Map(incidents.map((inc) => [inc._id, inc])),

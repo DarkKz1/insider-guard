@@ -1,0 +1,11 @@
+# Keep the local on-disk snapshot out of the deployment bundle. On Vercel
+# persistence is Supabase (PostgREST); a bundled data/store.json would mask the
+# durable snapshot on cold-start and serve stale local data.
+data/store.json
+data/.store.*.tmp
+*.log
+.DS_Store
+index_*.html
+*-backup.html
+demo-screenshot.png
+verify-screenshot.png
