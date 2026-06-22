@@ -5,8 +5,15 @@ const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 
-const DB_PATH =
-  process.env.DB_PATH || path.join(__dirname, '..', 'data', 'insider.db');
+// On serverless (Vercel/Lambda) the project filesystem is read-only except /tmp.
+// Use /tmp for the DB there; locally keep the project data/ dir. Explicit
+// DB_PATH env always wins.
+const IS_SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
+const DEFAULT_DB_PATH = IS_SERVERLESS
+  ? path.join('/tmp', 'insider.db')
+  : path.join(__dirname, '..', 'data', 'insider.db');
+
+const DB_PATH = process.env.DB_PATH || DEFAULT_DB_PATH;
 
 // ensure parent dir exists
 const dir = path.dirname(DB_PATH);

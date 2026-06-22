@@ -6,6 +6,7 @@ const path = require('path');
 const express = require('express');
 const pkg = require('../package.json');
 const { db } = require('./db');
+const { ensureSeed } = require('./bootstrap');
 
 const ingestRoutes = require('./routes/ingest.routes');
 const incidentsRoutes = require('./routes/incidents.routes');
@@ -27,6 +28,19 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
+});
+
+// --- cold-start seed guard: ensure the demo corpus exists before any API call.
+// On serverless the /tmp DB starts empty on a cold instance; this generates the
+// deterministic seed once per warm instance. Cheap no-op once seeded.
+app.use('/api', (req, res, next) => {
+  try {
+    ensureSeed();
+    next();
+  } catch (e) {
+    console.error('[bootstrap] seed failed', e);
+    next(e);
+  }
 });
 
 // --- health (Railway/Render liveness probe) ---
