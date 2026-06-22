@@ -1,9 +1,9 @@
-# Forces native build toolchain so better-sqlite3 compiles on Railway.
+# Pure-JS store (no native modules) — only Node is needed at build time.
 [phases.setup]
-nixPkgs = ["nodejs_20", "python3", "gcc", "gnumake"]
+nixPkgs = ["nodejs_20"]
 
 [phases.install]
 cmds = ["npm ci || npm install"]
 
 [start]
-cmd = "npm run seed -- --keep && npm start"
+cmd = "npm start"

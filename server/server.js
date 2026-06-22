@@ -81,9 +81,15 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  // bind 0.0.0.0 so Railway/containers can route external traffic to PORT.
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`[server] Insider Guard up on http://localhost:${PORT}`);
     console.log(`[server] health: http://localhost:${PORT}/api/health`);
+    try {
+      console.log(`[server] store snapshot: ${store.DB_PATH}`);
+    } catch (e) {
+      /* noop */
+    }
   });
 }
 

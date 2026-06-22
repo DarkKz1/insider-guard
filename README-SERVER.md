@@ -107,29 +107,84 @@ The exact config (weights, VOLUME_MULT, baseline window, thresholds) is snapshot
 
 ---
 
+## Persistence (pure-JS store, optional disk snapshot)
+
+The data layer is a **pure-JS store** (`server/store.js`) — no native modules,
+no SQLite. State (datasets / incidents / clean-user-days / active flag) lives in
+RAM and is **snapshotted to a single JSON file** so it survives restarts on a
+long-lived host with a mounted volume.
+
+- **`DB_PATH`** — path to the JSON snapshot. Default `./data/store.json` locally,
+  set to `/data/store.json` on Railway (mounted volume).
+- **On start:** if `DB_PATH` exists → state is loaded from it (uploaded logs and
+  the active dataset survive the restart). If it does NOT exist → `bootstrap.js`
+  generates the deterministic seed corpus and the first save creates the file.
+- **On every mutation** (ingest a log, activate a dataset) → the snapshot is
+  rewritten **atomically** (write temp file + `rename`), so a crash mid-write can
+  never corrupt the snapshot.
+- **Graceful degradation:** on a read-only / ephemeral filesystem (Vercel, where
+  the function FS is not writable) a failed write is **warned once** and the store
+  keeps running purely in-memory — the process never crashes. So the *same code*
+  persists on Railway and runs ephemerally on Vercel.
+
+`PORT` is read from env with a `3000` fallback; the server binds `0.0.0.0`.
+
+---
+
 ## Deploy
 
-`DB_PATH` env points SQLite at a persistent volume (defaults to `./data/insider.db`). `PORT` from env (Railway/Render inject it).
+### Railway — persistent (primary)
 
-### Railway (primary)
-Zero-config Node detection; `nixpacks.toml` pins Node 20 + native build toolchain for better-sqlite3; volume mounted at `/data`.
+Long-lived Node process + a mounted volume → real persistence. `railway.json`
+pins NIXPACKS, `startCommand: npm start`, healthcheck `/api/health`,
+`restartPolicyType: ON_FAILURE`. `nixpacks.toml` pins Node 20 (no native build
+toolchain needed — the store is pure JS). `.nvmrc` / `engines` = Node 20.
+
 ```bash
-npx @railway/cli login && npx @railway/cli init && npx @railway/cli up
+# 1. link a project (interactive: creates or selects a Railway project)
+railway init
+
+# 2. add a persistent volume mounted at /data (Railway CLI v4)
+railway volume add --mount-path /data
+
+# 3. point the store at the volume (persists across restarts/redeploys)
+railway variable set DB_PATH=/data/store.json
+
+# 4. deploy (uploads the repo, builds with NIXPACKS, runs `npm start`)
+railway up
 ```
-`railway.json` start = `npm run seed -- --keep && npm start`, healthcheck `/api/health`. Add a volume and set `DB_PATH=/data/insider.db`.
+
+First boot: snapshot is absent → seed runs → `/data/store.json` is written.
+Every restart after that loads the existing snapshot, so uploaded datasets and
+the active selection are retained. `PORT` is injected by Railway automatically.
+
+> CLI notes (Railway CLI v4.x, verified against `railway --version` 4.31):
+> `railway volume add --mount-path <path>` creates and attaches the volume;
+> `railway variable set KEY=VALUE` sets an env var (`railway variable list` to
+> view; the older `railway variables --set "K=V"` flag form still works but is
+> marked legacy on v4). If a command prompts for a service, pick the deployed
+> one (or pass `-s <service>`).
 
 ### Render (fallback)
-Push to GitHub → New Blueprint → pick repo (`render.yaml` mounts a 1GB disk at `/data`, sets `DB_PATH`). Or `render blueprint launch`.
+Push to GitHub → New Blueprint → pick repo (`render.yaml` mounts a disk at
+`/data`; set `DB_PATH=/data/store.json`). Or `render blueprint launch`.
 
 ### Fly.io (fallback)
 ```bash
-fly launch --now    # Dockerfile (node:20-slim + build-essential), fly.toml mounts a volume at /data
+fly launch --now    # Dockerfile (node:20-slim), fly.toml mounts a volume at /data
 ```
+Set `DB_PATH=/data/store.json` (e.g. `fly secrets set DB_PATH=/data/store.json`).
 
 ### Heroku-style hosts
-`Procfile` provided (`web: npm run seed -- --keep && npm start`).
+`Procfile` provided (`web: npm start`). Note: Heroku's dyno FS is ephemeral, so
+without an attached persistent disk the store runs in-memory (re-seeds on boot).
 
-### Why not Vercel
-Serverless filesystem is ephemeral — SQLite writes are lost between invocations. Use Railway/Render/Fly (persistent disk). For Vercel you'd need to swap SQLite for a hosted DB.
+### Vercel (still supported, ephemeral)
+`api/index.js` exports the Express app directly; `vercel.json` rewrites `/api/*`.
+The serverless FS is not writable, so the store runs **in-memory** — it seeds
+deterministically on the first request per warm instance and a failed snapshot
+write is silently downgraded (warn once). Nothing to configure; the same code
+path works. For durable storage on Vercel you'd attach a hosted DB.
 
-**If no CLI/auth is available**, the local run above is fully functional with the real engine + seeded corpus — that is the guaranteed deliverable.
+**If no CLI/auth is available**, the local run above is fully functional with the
+real engine + seeded corpus — that is the guaranteed deliverable.

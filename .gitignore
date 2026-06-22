@@ -2,6 +2,8 @@ node_modules/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+data/store.json
+data/.store.*.tmp
 *.log
 .DS_Store
 .env
