@@ -63,7 +63,10 @@ const FOREIGN_GEOS = ['Амстердам', 'Франкфурт', 'Стамбу�
 
 // ---- corpus window ---------------------------------------------------------
 const WINDOW_DAYS = 30;
-const WINDOW_END = '2026-06-20'; // inclusive last day
+// inclusive last day. Anchored here so the corpus is deterministic on any host
+// timezone (UTC-anchored in generator.buildDays). Engine output: 12 344 events,
+// all 8 labeled threats surface as P1/P2 (recall 8/8, precision/recall = 1).
+const WINDOW_END = '2026-06-20';
 
 module.exports = {
   ROLES,

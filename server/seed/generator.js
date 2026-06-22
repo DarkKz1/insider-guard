@@ -42,15 +42,20 @@ function pad2(n) {
   return String(n).padStart(2, '0');
 }
 
-// build the day list (business-day weighted: weekends sparse)
+// build the day list (business-day weighted: weekends sparse).
+// Compute every day purely from the UTC calendar so the corpus is byte-identical
+// on any host timezone (Vercel runs UTC; a local TZ would otherwise shift the
+// window and day-of-week, changing weekend sparsity and the incident count).
+// We anchor to noon-UTC to avoid any DST/rounding edge and read the date in UTC.
+// This reproduces the documented demo deterministically: 12 344 events /
+// 13 incidents (the 8 labeled threats all surface as P1/P2).
 function buildDays() {
-  const end = new Date(WINDOW_END + 'T00:00:00');
+  const end = new Date(WINDOW_END + 'T12:00:00.000Z');
   const days = [];
   for (let i = WINDOW_DAYS - 1; i >= 0; i--) {
-    const d = new Date(end);
-    d.setDate(end.getDate() - i);
+    const d = new Date(end.getTime() - i * 24 * 60 * 60 * 1000);
     const iso = d.toISOString().slice(0, 10);
-    const dow = d.getDay(); // 0 sun .. 6 sat
+    const dow = d.getUTCDay(); // 0 sun .. 6 sat, in UTC
     days.push({ iso, dow, weekend: dow === 0 || dow === 6 });
   }
   return days;
