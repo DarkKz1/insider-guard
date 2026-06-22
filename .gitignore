@@ -5,3 +5,4 @@ data/*.db-shm
 *.log
 .DS_Store
 .env
+.vercel
