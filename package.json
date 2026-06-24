@@ -2,6 +2,14 @@
   "name": "ai-shield-server",
   "version": "1.0.0",
   "description": "Insider Guard — real UEBA insider-threat detection backend (Node + Express + SQLite). Baseline computed per-user from history.",
+  "config": {
+    "env": {
+      "INGEST_TOKEN": "Optional. When set, POST /api/ingest requires `Authorization: Bearer <INGEST_TOKEN>` (else 401). Only an authenticated upload may become the global-active dataset; anonymous uploads are ingested but kept INACTIVE so the seed corpus stays untouched. Unset = local/dev: uploads allowed, but still never deactivate the seed.",
+      "RATE_LIMIT_MAX": "Optional. Max /api requests per window per IP. Default 100.",
+      "RATE_LIMIT_WINDOW_MS": "Optional. Rate-limit window in ms. Default 900000 (15 min). GET /api/health is exempt.",
+      "INGEST_DOC": "See server/routes/ingest.routes.js header for full auth/activation semantics."
+    }
+  },
   "type": "commonjs",
   "main": "server/server.js",
   "scripts": {
@@ -17,6 +25,7 @@
     "@supabase/supabase-js": "^2.108.2",
     "csv-parse": "^5.6.0",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.5.2",
     "multer": "^2.2.0",
     "nanoid": "^3.3.8",
     "serverless-http": "^3.2.0"

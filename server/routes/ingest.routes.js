@@ -7,6 +7,45 @@ const { persistDataset } = require('../persist');
 
 const router = express.Router();
 
+// --- ingest auth (OWASP A01 Broken Access Control / A07 Auth Failures) -----
+// The seed/demo corpus is what the judges see. An anonymous POST /api/ingest
+// must NEVER deactivate or overwrite it (see persistDataset activate flag).
+//
+// Two layers of protection:
+//   1. INGEST_TOKEN (env, optional). When set, every /api/ingest call MUST
+//      carry `Authorization: Bearer <INGEST_TOKEN>` or it is rejected 401.
+//      When unset (local/dev), uploads are allowed WITHOUT a token.
+//   2. activation gating. ONLY a request that presented a valid bearer token
+//      may make its uploaded dataset the GLOBAL active one (and thereby
+//      replace the seed as the default view). An anonymous (no-token) upload
+//      is still ingested + analysable by its own datasetId, but it is created
+//      INACTIVE so the seed corpus stays active/untouched for everyone else.
+//
+// `req._ingestAuthed` is set true only when a valid token was presented.
+function ingestAuth(req, res, next) {
+  const token = process.env.INGEST_TOKEN || '';
+  const header = req.headers['authorization'] || '';
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  const presented = m ? m[1].trim() : '';
+
+  if (!token) {
+    // No token configured (local/dev). Allow ingest, but treat it as
+    // unauthenticated: it may NOT seize global-active from the seed.
+    req._ingestAuthed = false;
+    return next();
+  }
+
+  if (presented && presented === token) {
+    req._ingestAuthed = true;
+    return next();
+  }
+
+  return res.status(401).json({
+    error: 'требуется авторизация',
+    detail: 'POST /api/ingest требует заголовок Authorization: Bearer <INGEST_TOKEN>',
+  });
+}
+
 // --- upload hardening (OWASP A04 Insecure Design / A05 Misconfig) ---------
 // Limits cap the resources a single request can consume (DoS / memory-leak
 // surface — multer < 2 had CVE-2025-47935 / CVE-2025-47944; we run multer 2.x
@@ -62,6 +101,7 @@ const MAX_EVENTS = 200000;
 // back as a clean 400/413 JSON instead of bubbling to the generic 500 handler.
 router.post(
   '/ingest',
+  ingestAuth,
   (req, res, next) => {
     upload.single('file')(req, res, (err) => {
       if (!err) return next();
@@ -122,6 +162,13 @@ router.post(
         return res.status(413).json({ error: 'слишком много событий', detail: `максимум ${MAX_EVENTS}` });
       }
 
+      // ACTIVATION GATING: only an authenticated upload may seize the global
+      // "active" dataset (and thus replace the seed corpus as the default view).
+      // An anonymous upload is persisted + fully analysable by its own
+      // datasetId, but stays INACTIVE so the seed corpus the judges see is
+      // never deactivated/overwritten (the core demo-mutation fix).
+      const activate = req._ingestAuthed === true;
+
       // AWAIT: persistDataset writes the durable snapshot (Supabase upsert) and
       // only resolves once it's persisted — so the response is sent AFTER the
       // dataset is safe on disk/Supabase (serverless freeze-after-res safety).
@@ -130,7 +177,7 @@ router.post(
         source: 'upload',
         events,
         hasGroundTruth,
-        activate: true,
+        activate,
       });
 
       return res.status(201).json({
@@ -145,6 +192,7 @@ router.post(
         hasGroundTruth: summary.hasGroundTruth,
         durationMs: summary.durationMs,
         summary: summary.summary,
+        active: activate, // anonymous uploads are ingested but NOT made active
       });
     } catch (e) {
       return res.status(400).json({ error: 'ошибка разбора лога', detail: e.message });

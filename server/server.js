@@ -4,6 +4,7 @@
 
 const path = require('path');
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const pkg = require('../package.json');
 const store = require('./store');
 const { ensureSeed } = require('./bootstrap');
@@ -17,6 +18,12 @@ const datasetRoutes = require('./routes/dataset.routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust the first proxy hop (Vercel/Railway/Render terminate TLS in front of
+// us). Needed so express-rate-limit keys on the real client IP via
+// X-Forwarded-For instead of the proxy's address. '1' (not `true`) avoids the
+// permissive-trust setup that would let a client spoof its rate-limit key.
+app.set('trust proxy', 1);
+
 // --- body parsing ---
 // Cap the JSON body to bound memory per request (DoS surface). 32 MB is ample
 // for the largest reasonable { events:[...] } ingest payload while rejecting an
@@ -29,10 +36,28 @@ app.use(express.urlencoded({ extended: false, limit: '256kb', parameterLimit: 10
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
+
+// --- rate limiting (OWASP A04 Insecure Design — anti-DoS) ------------------
+// A security tool must not itself be a trivial DoS / brute-force target. Cap
+// every client (per-IP) to RATE_LIMIT_MAX requests per RATE_LIMIT_WINDOW_MS.
+// Defaults: 100 requests / 15 minutes. Liveness probes (GET /api/health) are
+// exempt so an orchestrator (Railway/Render/Vercel) can poll freely. Preflight
+// OPTIONS is already short-circuited by CORS above, so it never reaches here.
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX) || 100;
+const apiLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  standardHeaders: true, // emit RateLimit-* headers
+  legacyHeaders: false,
+  skip: (req) => req.path === '/health' || req.path === '/api/health',
+  message: { error: 'слишком много запросов', detail: 'превышен лимит запросов — повторите позже' },
+});
+app.use('/api', apiLimiter);
 
 // --- persistence load guard: GUARANTEE the snapshot is loaded (async, e.g.
 // Supabase) BEFORE any store read in this request. On serverless the per-
