@@ -32,9 +32,10 @@
           panel2:  '#121212',   // card
           panel3:  '#1A1A1B',   // hover / active
           edge:    'rgba(255,255,255,0.08)',  // hairline soft
-          edge2:   'rgba(255,255,255,0.16)',  // hairline strong / focus
-          accent:  '#57C1FF',   // info / active (signal-only)
-          accent2: '#3aa6e8',
+          edge2:   'rgba(255,255,255,0.16)',  // hairline strong / console-frame
+          accent:  '#38E07B',   // brand / active — DFX neon-green (signal + interactive)
+          accent2: '#23A55A',   // darker green (hover/press)
+          brand:   '#38E07B',
           // status-light system (насыщенный цвет = ТОЛЬКО сигнал). Ключи crit/bad/warn/good несут логику.
           good:  '#59D499',     // ok / low
           warn:  '#FFC533',     // warning / medium
@@ -111,11 +112,11 @@
   input[type="range"].soc { -webkit-appearance:none; appearance:none; height:5px; border-radius:9999px;
     background: linear-gradient(90deg, #59D499 0%, #FFC533 50%, #FF6161 100%); outline:none; }
   input[type="range"].soc::-webkit-slider-thumb { -webkit-appearance:none; appearance:none;
-    width:16px; height:16px; border-radius:9999px; background:#101111; border:2px solid #57C1FF;
+    width:16px; height:16px; border-radius:9999px; background:#101111; border:2px solid #38E07B;
     cursor:pointer; transition:transform .12s ease-out; }
   input[type="range"].soc::-webkit-slider-thumb:hover { transform:scale(1.12); }
   input[type="range"].soc::-moz-range-thumb { width:16px; height:16px; border-radius:9999px; background:#101111;
-    border:2px solid #57C1FF; cursor:pointer; }
+    border:2px solid #38E07B; cursor:pointer; }
 
   /* card surface — элевация цветом (panel2), hairline-бордер задаётся классом border-edge */
   .panel-card { background: #121212; }
@@ -124,6 +125,48 @@
   .hl-glow { /* glow убран по брифу — оставлено как no-op для совместимости className */ }
   .count-up { animation: countup .5s ease-out; }
   @keyframes countup { from { opacity:.3; } to { opacity:1; } }
+
+  /* ============================================================
+     DFX dark-tech layer — console frames, mono display, green system
+     ============================================================ */
+  /* structural / display type = mono uppercase (DFX poster headlines).
+     Body prose stays Inter for dense Russian legibility. */
+  .t-mono   { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  .t-head   { font-family: 'JetBrains Mono', ui-monospace, monospace; text-transform: uppercase;
+              letter-spacing: 0.005em; font-weight: 700; }
+  .t-eyebrow{ font-family: 'JetBrains Mono', ui-monospace, monospace; text-transform: uppercase;
+              letter-spacing: 0.18em; font-weight: 600; }
+
+  /* console-frame: hairline box with green corner ticks (TL + BR) — the DFX signature */
+  .console-frame { position: relative; border: 1px solid rgba(255,255,255,0.14); }
+  .console-frame::before, .console-frame::after {
+    content:""; position:absolute; width:11px; height:11px; pointer-events:none; }
+  .console-frame::before { top:-1px;  left:-1px;  border-top:2px solid #38E07B; border-left:2px solid #38E07B; }
+  .console-frame::after  { bottom:-1px; right:-1px; border-bottom:2px solid #38E07B; border-right:2px solid #38E07B; }
+  /* 4-corner variant for hero/stat panels */
+  .corner-4::before, .corner-4::after,
+  .corner-4 > .ctick { content:""; position:absolute; width:11px; height:11px; pointer-events:none; }
+  .corner-4 .ctick.tr { top:-1px; right:-1px; border-top:2px solid #38E07B; border-right:2px solid #38E07B; }
+  .corner-4 .ctick.bl { bottom:-1px; left:-1px; border-bottom:2px solid #38E07B; border-left:2px solid #38E07B; }
+
+  /* dark-green stat panel + faint diamond/dot texture (DFX bottom stat cards) */
+  .stat-tint { background:
+      radial-gradient(rgba(56,224,123,0.10) 1px, transparent 1.4px) 0 0 / 13px 13px,
+      linear-gradient(135deg, rgba(56,224,123,0.085), rgba(56,224,123,0.012) 60%),
+      #0C0E0C; }
+
+  /* green status pill (DFX hero eyebrow "● ...") */
+  .pill-green { display:inline-flex; align-items:center; gap:8px; border:1px solid rgba(56,224,123,0.32);
+      background: rgba(56,224,123,0.07); color:#9FE7BC; }
+
+  /* buttons — filled neon-green primary + ghost secondary (DFX "GET A DEMO" / "LEARN MORE") */
+  .btn-green { background:#38E07B; color:#07080A; font-weight:700; transition: filter .15s, transform .08s; }
+  .btn-green:hover { filter: brightness(1.08); }
+  .btn-green:active { transform: translateY(1px); }
+  .btn-ghost { background:transparent; color:#F4F4F6; border:1px solid rgba(255,255,255,0.22);
+      transition: border-color .15s, color .15s, transform .08s; }
+  .btn-ghost:hover { border-color:#38E07B; color:#38E07B; }
+  .btn-ghost:active { transform: translateY(1px); }
 </style>
 </head>
 <body>
@@ -860,7 +903,7 @@ function GraphView({ cs, res }) {
     if (id === hub) return '#FF6161';             // хаб — critical red (цель/источник)
     if (n.kind === 'resource') return '#FF6161';  // crown-jewel ресурс на пути
     if (n.kind === 'host') return '#FFC533';      // хост на пути — warning
-    return '#57C1FF';                             // user на пути — active
+    return '#38E07B';                             // user на пути — active
   };
   // риск-радиус: узлы на пути крупнее; ресурс-цель и хаб самые крупные
   const radiusFor = (id) => {
@@ -885,7 +928,7 @@ function GraphView({ cs, res }) {
 
   return (
     <div>
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded-lg" style={{background:'#0D0D0D', border:'1px solid rgba(255,255,255,0.08)'}}>
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto rounded-lg" style={{background:'#0B0D0B', border:'1px solid rgba(56,224,123,0.16)'}}>
       <defs>
         <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
           <path d="M0,0 L6,3 L0,6 Z" fill="#6A6B6C" />
@@ -985,7 +1028,7 @@ function GraphView({ cs, res }) {
                 </button>
               : <button onClick={onPlay} aria-label="Воспроизвести"
                   className="flex items-center justify-center w-8 h-8 rounded-lg transition hover:brightness-110"
-                  style={{background:'#57C1FF', color:'#07080A'}}>
+                  style={{background:'#38E07B', color:'#07080A'}}>
                   <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M2.5 1.4 10 6 2.5 10.6Z"/></svg>
                 </button>}
             <button onClick={onReset} aria-label="Сброс (полный путь)" title="Сброс — показать полный путь"
@@ -1001,7 +1044,7 @@ function GraphView({ cs, res }) {
             className="soc flex-1 min-w-[160px]" aria-label="Таймлайн хопов attack-path" />
 
           {/* счётчик хопов */}
-          <span className="font-mono text-[11px] shrink-0 tabular-nums" style={{color:'#57C1FF'}}>
+          <span className="font-mono text-[11px] shrink-0 tabular-nums" style={{color:'#38E07B'}}>
             хоп <span className="font-bold">{step}</span><span className="text-ink4">/{maxStep}</span>
           </span>
         </div>
@@ -1028,8 +1071,8 @@ function GraphView({ cs, res }) {
 
     {/* ПЕРСИСТЕНТНАЯ ЛЕГЕНДА со счётчиками — жюри декодирует без нарратива */}
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-3 text-[11px]">
-      <span className="flex items-center gap-1.5 font-mono" style={{color:'#57C1FF'}}>
-        <svg width="13" height="13" viewBox="-8 -8 16 16"><NodeGlyph kind="user" color="#57C1FF" s={0.85}/></svg>
+      <span className="flex items-center gap-1.5 font-mono" style={{color:'#38E07B'}}>
+        <svg width="13" height="13" viewBox="-8 -8 16 16"><NodeGlyph kind="user" color="#38E07B" s={0.85}/></svg>
         <span className="font-bold mono-num">{cnt.user}</span><span className="text-ink3">польз.</span>
       </span>
       <span className="flex items-center gap-1.5 font-mono" style={{color:'#FFC533'}}>
@@ -1064,7 +1107,7 @@ const SEV_LABEL = { crit:'CRITICAL', bad:'HIGH', warn:'MEDIUM', high:'HIGH', goo
 function ScoreRing({ score, color }) {
   const R = 46, C = 2*Math.PI*R, SZ = 124, CT = SZ/2;
   const off = C * (1 - score/100);
-  const col = SEV[color] || '#38bdf8';
+  const col = SEV[color] || '#38E07B';
   return (
     <div className="relative" style={{width:SZ,height:SZ}}>
       <svg width={SZ} height={SZ} className="-rotate-90">
@@ -1217,39 +1260,46 @@ function App() {
   return (
     <div className="min-h-full flex flex-col">
       {/* ШАПКА — тонкая: лого + один hero-статус + тихие табы. Больше ничего. */}
-      <header className="sticky top-0 z-20 bg-ink/85 backdrop-blur border-b border-edge px-8 pt-6 pb-0">
+      <header className="sticky top-0 z-20 bg-ink/85 backdrop-blur border-b border-edge px-8 pt-5 pb-0">
         <div className="max-w-[1180px] mx-auto w-full">
-          <div className="flex items-end justify-between gap-6 flex-wrap">
+          {/* DFX framed console-bar: identity left · live status chip right */}
+          <div className="console-frame rounded-lg px-5 py-3.5 flex items-center justify-between gap-6 flex-wrap bg-panel/40">
             <div className="flex items-center gap-3.5">
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" className="shrink-0">
-                <path d="M12 2.5 4 5.5v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10v-6L12 2.5Z" stroke="#57C1FF" strokeWidth="1.5" fill="none"/>
-                <path d="M8.4 12.2l2.4 2.4 4.8-5" stroke="#59D499" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M12 2.5 4 5.5v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10v-6L12 2.5Z" stroke="#38E07B" strokeWidth="1.5" fill="none"/>
+                <path d="M8.4 12.2l2.4 2.4 4.8-5" stroke="#38E07B" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
               <div className="leading-tight">
-                <h1 className="font-extrabold text-[15px] tracking-tightest text-ink1">
-                  AI&nbsp;Shield <span className="text-ink4 font-medium">·</span> <span className="text-ink3 font-semibold">Insider&nbsp;Guard</span>
+                <h1 className="t-head text-[16px] text-ink1">
+                  AI<span className="text-accent">/</span>SHIELD
                 </h1>
-                {/* ОДИН hero-статус-строкой */}
-                <p className="text-[13px] mt-1.5 text-ink2">
-                  <span className="font-mono font-bold text-ink1">{heroStat.threats} инсайдер-угроз</span>
-                  <span className="text-ink4"> · </span>
-                  <span className="font-mono font-bold" style={{color:SEV.crit}}>{heroStat.critical} критических</span>
-                </p>
+                <p className="t-eyebrow text-[9.5px] text-ink4 mt-1">Insider&nbsp;Guard · UEBA</p>
               </div>
             </div>
-            <span className="text-muted font-mono text-[10px] pb-1 hidden sm:block">AFM AI Hackathon 2026 · трек ai-shield · синтетика</span>
+            {/* live status chip — threats / critical в очереди */}
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="pill-green rounded-md px-2.5 py-1.5 t-mono text-[11px]">
+                <span className="w-1.5 h-1.5 rounded-full bg-accent beacon text-accent shrink-0"></span>
+                <span className="font-bold text-ink1">{heroStat.threats}</span>
+                <span className="text-ink3">инсайдер-угроз</span>
+                <span className="text-ink5">·</span>
+                <span className="font-bold" style={{color:SEV.crit}}>{heroStat.critical}</span>
+                <span className="text-ink3">крит.</span>
+              </span>
+              <span className="text-muted t-mono text-[9.5px] hidden lg:block uppercase tracking-[0.12em]">AFM AI Hackathon 2026 · синтетика</span>
+            </div>
           </div>
 
-          {/* ТИХИЕ ТАБЫ — навигация подчёркиванием, без коробок */}
-          <nav className="flex items-center gap-7 mt-6 -mb-px">
+          {/* ТИХИЕ ТАБЫ — навигация подчёркиванием, mono uppercase */}
+          <nav className="flex items-center gap-7 mt-5 -mb-px">
             {TABS.map(t => {
               const on = mode === t.id;
               return (
                 <button key={t.id} onClick={()=> setMode(t.id)}
-                  className={`relative text-[13px] pb-3 transition ${on ? 'text-ink1 font-semibold' : 'text-ink4 hover:text-ink2 font-medium'}`}>
+                  className={`relative t-eyebrow text-[11px] pb-3 transition ${on ? 'text-ink1' : 'text-ink4 hover:text-ink2'}`}>
                   {t.label}
                   <span className="absolute left-0 right-0 bottom-0 h-[2px] rounded-full transition"
-                    style={{background: on ? '#57C1FF' : 'transparent'}}></span>
+                    style={{background: on ? '#38E07B' : 'transparent'}}></span>
                 </button>
               );
             })}
@@ -1261,6 +1311,32 @@ function App() {
       {mode === 'queue' && (
         <main className="flex-1 px-8 py-10 fade-in">
           <div className="max-w-[1180px] mx-auto w-full">
+
+            {/* ===== DFX hero band — тезис продукта, framed console panel ===== */}
+            <div className="relative console-frame corner-4 stat-tint rounded-xl px-7 py-8 mb-10 overflow-hidden">
+              <span className="ctick tr"></span><span className="ctick bl"></span>
+              <span className="pill-green rounded-md px-2.5 py-1 t-eyebrow text-[10px]">
+                <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> UEBA · поведенческий детект инсайдера
+              </span>
+              <h2 className="t-head text-[27px] md:text-[33px] leading-[1.06] text-ink1 mt-5 max-w-[780px]">
+                Инсайдер с легальным доступом.<br/>
+                <span className="text-accent">Пойман по отклонению от baseline.</span>
+              </h2>
+              <p className="text-[13px] text-ink3 mt-4 max-w-[580px] leading-relaxed">
+                Периметровый DLP/SIEM не видит «легального» доступа. Мы скорим каждое действие против персональной поведенческой нормы самого пользователя.
+              </p>
+              <div className="flex items-center gap-3 mt-7 flex-wrap">
+                <button onClick={()=> openIncident(queue[0].cs.id)} className="btn-green rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">Разобрать топ-инцидент ›</button>
+                <button onClick={()=> setMode('validation')} className="btn-ghost rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">Доказательство точности</button>
+              </div>
+            </div>
+
+            {/* заголовок очереди */}
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
+              <span className="t-eyebrow text-[11px] text-ink3">Очередь триажа · по risk-score</span>
+              <span className="t-mono text-[10.5px] text-ink5">{queue.length} инцидентов</span>
+            </div>
+
             {queue.map(({cs,res}, qi) => {
               const c = SEV[res.priority.color];
               const pLabel = res.priority.lvl.split(' ')[0]; // P1/P2/...
@@ -1345,8 +1421,11 @@ function Validation({ threshold, setThreshold, m }) {
     <div className="space-y-14 fade-in">
       {/* заголовок секции */}
       <div>
-        <h2 className="text-[24px] font-extrabold tracking-tightest text-ink1">Доказательство точности</h2>
-        <p className="text-[13px] text-ink4 mt-2 max-w-[640px] leading-relaxed">
+        <span className="pill-green rounded-md px-2.5 py-1 t-eyebrow text-[10px]">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> Benchmark · ground-truth
+        </span>
+        <h2 className="t-head text-[26px] text-ink1 mt-4">Доказательство точности</h2>
+        <p className="text-[13px] text-ink4 mt-3 max-w-[640px] leading-relaxed">
           Двигайте порог тревоги — метрики пересчитываются вживую на том же корпусе и том же ground-truth.
         </p>
       </div>
@@ -1354,8 +1433,8 @@ function Validation({ threshold, setThreshold, m }) {
       {/* WHAT-IF — широкий, воздушный */}
       <section>
         <div className="flex items-center justify-between mb-5">
-          <span className="text-[12px] uppercase tracking-[0.14em] text-ink3 font-semibold">What-if · порог тревоги</span>
-          <span className="font-mono text-[15px] font-bold" style={{color:'#57C1FF'}}>score ≥ {threshold}</span>
+          <span className="t-eyebrow text-[11px] text-ink3">What-if · порог тревоги</span>
+          <span className="font-mono text-[15px] font-bold" style={{color:'#38E07B'}}>score ≥ {threshold}</span>
         </div>
         <input type="range" min="0" max="100" value={threshold} onChange={e => setThreshold(+e.target.value)} className="soc w-full" />
         <div className="flex justify-between text-[10px] text-ink4 mt-2.5 font-mono">
@@ -1367,20 +1446,23 @@ function Validation({ threshold, setThreshold, m }) {
         </p>
       </section>
 
-      {/* CONFUSION MATRIX — разделено пространством, не линиями */}
+      {/* CONFUSION MATRIX — framed dark-green stat panel (DFX) */}
       <section>
-        <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Confusion matrix</span>
-        <div className="flex flex-wrap items-start gap-x-14 gap-y-8 mt-7">
-          <ConfCell label="поймано · TP" val={m.TP} color="#59D499" />
-          <ConfCell label="лож. тревог · FP" val={m.FP} color="#FF6161" />
-          <ConfCell label="пропуски · FN" val={m.FN} color="#FFC533" />
-          <ConfCell label="верно сняты · TN" val={m.TN} color="#57C1FF" />
+        <span className="t-eyebrow text-[11px] text-ink4">Confusion matrix</span>
+        <div className="relative console-frame corner-4 stat-tint rounded-xl px-8 py-9 mt-5 overflow-hidden">
+          <span className="ctick tr"></span><span className="ctick bl"></span>
+          <div className="flex flex-wrap items-start gap-x-14 gap-y-8">
+            <ConfCell label="поймано · TP" val={m.TP} color="#59D499" />
+            <ConfCell label="лож. тревог · FP" val={m.FP} color="#FF6161" />
+            <ConfCell label="пропуски · FN" val={m.FN} color="#FFC533" />
+            <ConfCell label="верно сняты · TN" val={m.TN} color="#9C9C9D" />
+          </div>
         </div>
       </section>
 
       {/* МЕТРИКИ КАЧЕСТВА */}
       <section>
-        <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Качество детекта</span>
+        <span className="t-eyebrow text-[11px] text-ink4">Качество детекта</span>
         <div className="flex flex-wrap items-start gap-x-14 gap-y-8 mt-7">
           <ValMetric label="Precision" value={pct(m.precision)} color={m.precision >= 0.99 ? '#59D499' : '#FFC533'} />
           <ValMetric label="Recall" value={pct(m.recall)} color={m.recall >= 0.99 ? '#59D499' : '#FFC533'} />
@@ -1397,7 +1479,7 @@ function Validation({ threshold, setThreshold, m }) {
 
       {/* СРАВНЕНИЕ С НАИВНЫМ DLP */}
       <section>
-        <span className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold">Против наивного периметрового DLP/SIEM</span>
+        <span className="t-eyebrow text-[11px] text-ink4">Против наивного периметрового DLP/SIEM</span>
         <div className="flex flex-wrap items-start gap-x-16 gap-y-8 mt-7">
           <div>
             <div className="font-mono font-extrabold text-[34px] leading-none kpi-tick" style={{color:'#59D499'}}>
@@ -1451,8 +1533,8 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
   return (
     <div className="fade-in">
       {/* НАЗАД */}
-      <button onClick={onBack} className="text-[12px] text-ink4 hover:text-ink2 transition mb-7 flex items-center gap-1.5">
-        <span className="text-[15px] leading-none">←</span> к очереди
+      <button onClick={onBack} className="t-eyebrow text-[10px] text-ink4 hover:text-accent transition mb-7 flex items-center gap-1.5">
+        <span className="text-[14px] leading-none">←</span> к очереди
       </button>
 
       {/* ЗАГОЛОВОК + ОДИН крупный score-ring + приоритет */}
@@ -1478,7 +1560,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
       {/* ГЕРОЙ — граф attack-path, центр экрана */}
       <section className="mb-12">
         <div className="flex items-center gap-3 mb-5">
-          <h3 className="text-[15px] font-semibold text-ink1 tracking-tightest">Attack-path</h3>
+          <h3 className="t-head text-[14px] text-ink1">Attack-path</h3>
           {res.graphStats.cycle
             ? <span className="text-[10px] font-mono uppercase tracking-wide" style={{color:'#FF6161'}}>● боковое перемещение</span>
             : <span className="text-[10px] font-mono uppercase tracking-wide" style={{color:'#FFC533'}}>● путь к данным</span>}
@@ -1488,7 +1570,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
 
       {/* ПОЧЕМУ ПОМЕЧЕНО — только топ-3, остальное по кнопке */}
       <section className="mb-12 max-w-[760px]">
-        <h3 className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold mb-6">Почему помечено</h3>
+        <h3 className="t-eyebrow text-[11px] text-ink4 mb-6">Почему помечено</h3>
         {res.shap.length === 0 && (
           <div className="flex items-center gap-2.5 text-[13px]" style={{color:'#59D499'}}>
             <span className="w-2 h-2 rounded-full" style={{background:'#59D499'}}></span>
@@ -1536,8 +1618,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
           {(RESPONSE[cs.typology] || [])[0] || 'Действий не требуется.'}
         </p>
         <button onClick={()=> setShowReport(v=>!v)}
-          className="text-[13px] font-semibold rounded-lg px-4 py-2.5 transition hover:brightness-110"
-          style={{background:'#57C1FF', color:'#07080A'}}>
+          className="btn-green rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">
           Сформировать инцидент-отчёт
         </button>
 
@@ -1545,7 +1626,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
           <div className="mt-8 space-y-10 fade-in">
             {/* полный плейбук — раскрытый */}
             <div>
-              <h3 className="text-[12px] uppercase tracking-[0.14em] text-ink4 font-semibold mb-4">Плейбук реагирования</h3>
+              <h3 className="t-eyebrow text-[11px] text-ink4 mb-4">Плейбук реагирования</h3>
               <ol className="space-y-3">
                 {(RESPONSE[cs.typology]||[]).map((r,i)=> (
                   <li key={i} className="text-[13px] text-ink2 flex gap-3 items-start leading-snug">
@@ -1563,8 +1644,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
                   placeholder="Anthropic API-ключ (опц.) — иначе mock"
                   className="text-[12px] bg-panel2 border border-edge rounded-lg px-3 py-2 w-64 font-mono text-ink1 placeholder:text-ink4 focus:border-accent outline-none transition" />
                 <button onClick={genSAR} disabled={sarLoading}
-                  className="text-[12px] font-semibold rounded-lg px-4 py-2 transition disabled:opacity-50 hover:brightness-110"
-                  style={{background:'#1A1A1B', color:'#F4F4F6', border:'1px solid rgba(255,255,255,0.16)'}}>
+                  className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px] disabled:opacity-50">
                   {sarLoading ? 'Генерация…' : '▸ Собрать черновик'}
                 </button>
               </div>
