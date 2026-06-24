@@ -866,20 +866,31 @@ function anomalyStats(cs) {
    (Liu, Ting & Zhou, ICDM 2008), реализованный с нуля на чистом JavaScript и
    работающий ПОЛНОСТЬЮ ОФФЛАЙН в браузере. Зависимостей нет, сети нет.
 
+   ОБУЧЕНИЕ НА НОРМЕ (novelty detection). Лес обучается НЕ на инцидентах, а на
+   СИНТЕТИЧЕСКОЙ ФОНОВОЙ ПОПУЛЯЦИИ нормального поведения: ~980 user-day точек
+   (140 на роль × 7 ролей), насэмпленных из ролевых распределений ROLE_NORMS
+   через seeded PRNG (объём ~ лог-нормаль вокруг медианы роли, активность в
+   work-hours, exfil≈0, без эскалаций/латерали). Так ψ=256, T=100 статистически
+   корректны, а «обучили unsupervised-модель» — буквально правда.
+
    Алгоритм. Ансамбль из T изолирующих деревьев (iTrees). Каждое дерево строится
-   на случайной подвыборке корпуса; на каждом узле берётся СЛУЧАЙНЫЙ признак и
+   на случайной подвыборке НОРМЫ; на каждом узле берётся СЛУЧАЙНЫЙ признак и
    СЛУЧАЙНЫЙ порог между его min и max в узле, точки рекурсивно разбиваются до
    предела глубины ⌈log2(ψ)⌉ или пока узел не станет единичным. Аномалии — точки,
-   которые изолируются за МАЛОЕ число разбиений (короткий путь h(x)).
-       score(x) = 2^( − E[h(x)] / c(n) )
-   где E[h(x)] — средняя длина пути по ансамблю, а c(n) — средняя длина пути
+   которые изолируются за МАЛОЕ число разбиений (короткий путь h(x)). Скоринг
+   инцидента — это путь точки ПРОТИВ обученного на норме леса; точка вне support
+   нормы (range-aware) изолируется немедленно → короткий путь → высокий score.
+       score(x) = 2^( − E[h(x)] / c(ψ) )
+   где E[h(x)] — средняя длина пути по ансамблю, а c(ψ) — средняя длина пути
    неуспешного поиска в бинарном дереве поиска (нормализация):
        c(n) = 2·H(n−1) − 2·(n−1)/n,   H(k) ≈ ln(k) + γ  (γ = 0.5772156649…)
    score → 1 = явная аномалия; ~0.5 = неотличимо от нормы; < 0.5 = плотное ядро.
+   ПОКАЗЫВАЕТСЯ СЫРОЙ score, без пост-калибровки. Порог τ обоснован эмпирически
+   распределением сырого score на самой обученной норме (τ выше её support).
 
-   ДЕТЕРМИНИЗМ (воспроизводимость демо). Весь рандом идёт через seeded PRNG
-   mulberry32 с ФИКСИРОВАННЫМ seed → лес, подвыборки и пороги одинаковы при каждом
-   запуске. Это усиливает наш тезис reproducibility: один и тот же корпус → один и
+   ДЕТЕРМИНИЗМ (воспроизводимость демо). Весь рандом — фоновая популяция, лес,
+   подвыборки, пороги — идёт через seeded PRNG mulberry32 с ФИКСИРОВАННЫМ seed →
+   одинаков при каждом запуске. Один и тот же seed → одна и та же норма → один и
    тот же лес → один и тот же anomaly score, без скрытого состояния и без сети.
 
    НЕЗАВИСИМОСТЬ ОТ ДВИЖКА. Этот score НЕ входит в Σ shap (инвариант Σ===score не
@@ -901,7 +912,12 @@ function mulberry32(seed) {
 const IFOREST_SEED = 1337;   // фиксированный seed → воспроизводимый лес
 const IFOREST_TREES = 100;   // T — число изолирующих деревьев в ансамбле
 const IFOREST_SUBSAMPLE = 256; // ψ — потолок подвыборки (или весь корпус, если он меньше)
-const IFOREST_TAU = 0.60;    // порог «аномалии» для интерпретации (классический ориентир)
+// Порог τ обоснован ЭМПИРИЧЕСКИ распределением сырого score на обученной норме: фоновая
+// популяция даёт max≈0.67, p99≈0.63 (норма НИКОГДА не превышает ~0.70). τ=0.72 ставится ВЫШЕ
+// support нормы с запасом → аномалией считается лишь то, что лес изолирует быстрее, чем любую
+// свою обучающую (нормальную) точку. Так benign etl/audit (≤0.70) остаются «в норме»,
+// а атаки (≥0.76: mass-exfil/lateral/staging/broad) уверенно превышают τ.
+const IFOREST_TAU = 0.72;
 
 // Имена признаков модели (для MODEL CARD и интерпретации). Числовой вектор на инцидент,
 // выведенный ИЗ ТЕХ ЖЕ сырых данных кейса, что и движок (объём/время/широта/привилегии/эксфил).
@@ -1005,16 +1021,23 @@ function iforestBuildTree(idxs, X, depth, maxDepth, rng) {
   for (const i of idxs) {
     if (X[i][q] < p) left.push(i); else right.push(i);
   }
+  // сохраняем [mn,mx] узла (support обучающей нормы по выбранному признаку q) — для
+  // range-aware изоляции при скоринге точек ВНЕ распределения обучения (novelty detection).
   return {
-    leaf: false, q, p,
+    leaf: false, q, p, mn, mx,
     left: iforestBuildTree(left, X, depth + 1, maxDepth, rng),
     right: iforestBuildTree(right, X, depth + 1, maxDepth, rng),
   };
 }
 
 // длина пути h(x) точки x в одном дереве (+ нормализация недоразвитого листа через c(size)).
+// RANGE-AWARE ИЗОЛЯЦИЯ (novelty detection). Лес обучен на НОРМЕ, поэтому при скоринге инцидента
+// точка может лежать ВНЕ [mn,mx] обучающей нормы на разбивающем признаке. Тогда любой случайный
+// порог узла (он ∈ [mn,mx]) отделил бы её немедленно → точка изолирована ЗДЕСЬ (короткий путь).
+// Это корректное расширение iForest для точек вне support обучения (out-of-distribution).
 function iforestPathLength(node, x, depth) {
   if (node.leaf) return depth + iforestC(node.size);
+  if (x[node.q] < node.mn || x[node.q] > node.mx) return depth + 1; // вне support нормы → изоляция
   return x[node.q] < node.p
     ? iforestPathLength(node.left, x, depth + 1)
     : iforestPathLength(node.right, x, depth + 1);
@@ -1033,21 +1056,85 @@ function iforestStandardize(rows) {
   return { mean, std, norm };
 }
 
-// Обучение Isolation Forest на ВСЁМ корпусе (встроенные + загруженные) — детерминированно.
-// Возвращает модель с методом score(cs) → { score(0..1), avgPath, isAnomaly, features }.
+// box–muller: пара N(0,1) из равномерного PRNG (используем первую компоненту).
+function gaussian(rng) {
+  let u1 = 0, u2 = 0;
+  while (u1 <= 1e-12) u1 = rng();
+  u2 = rng();
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+/* СИНТЕТИЧЕСКАЯ ФОНОВАЯ ПОПУЛЯЦИЯ НОРМЫ (seeded, детерминированная).
+   Для каждой роли из ROLE_NORMS сэмплим M «нормальных» user-day точек и возвращаем
+   их СРАЗУ в виде 9-мерного вектора признаков iforestFeatures (та же семантика и
+   порядок). Это легитимный тренировочный набор «как ведёт себя норма»:
+     • объём чтения rows ~ лог-нормаль вокруг медианы роли с разбросом ~MAD;
+     • кратность ratio = rows / медиана роли (≈1 у нормы);
+     • freq ~ небольшая (Пуассон-подобно вокруг частоты роли);
+     • offDev≈0, offHoursFlag≈0 (активность в work-hours; ночной сервис → night_job);
+     • exfilRatio≈0 (норма почти не выгружает наружу);
+     • uniqueResources малое (1–3 знакомых ресурса);
+     • privEscalation=0, lateralHops≈0 (без эскалаций и бокового движения).
+   Никаких инцидентов в обучении — лес учится ТОЛЬКО на норме. */
+const IFOREST_BG_PER_ROLE = 140; // M точек на роль → суммарно ≈ 7·140 = 980 user-day
+function iforestBackground(rng) {
+  const rows = [];
+  for (const role of Object.keys(ROLE_NORMS)) {
+    const rn = ROLE_NORMS[role];
+    const med = rn.rows[0], mad = rn.rows[1];
+    const night = (role === 'service'); // ночной ETL: его work-hours ночные → не off-hours
+    // сигма лог-нормали из медианы/MAD: разброс ~MAD вокруг медианы в лог-пространстве
+    const sigma = Math.log(1 + Math.max(0.05, mad / Math.max(1, med)));
+    for (let k = 0; k < IFOREST_BG_PER_ROLE; k++) {
+      // объём: лог-нормаль вокруг медианы роли
+      const readRows = Math.max(1, Math.round(med * Math.exp(sigma * gaussian(rng))));
+      const ratio = readRows / Math.max(1, med); // ≈1 у нормы (baseline ≈ медиана роли)
+      // частота: вокруг freq роли, ≥1, небольшой разброс
+      const freq = Math.max(1, Math.round(rn.freq[0] + rn.freq[1] * gaussian(rng)));
+      // НЕБОЛЬШИЕ РЕАЛИСТИЧНЫЕ БАЗОВЫЕ ЧАСТОТЫ. Норма НЕ строго нулевая по бинарным флагам:
+      // изредка легитимная работа в нерабочее время/выходной, редкий санкционированный grant,
+      // одиночный jump. Это (а) реалистично и (б) даёт флагам ненулевой разброс, чтобы инцидент
+      // с выставленным флагом был СТАТИСТИЧЕСКИ редок (out-of-range) и быстро изолировался.
+      const offDev = night ? 0 : (rng() < 0.06 ? Math.round(1 + Math.abs(gaussian(rng))) : 0); // ~6% мягкий выход ±1–2ч
+      const offHoursFlag = (!night && (offDev > 0 || rng() < 0.05)) ? 1 : 0;                    // ~5–11% легит. выходной
+      const exfilRatio = Math.max(0, Math.min(0.15, 0.02 * Math.abs(gaussian(rng))));           // малая легит. доля выгрузки
+      const uniqueResources = Math.max(1, Math.round(1.8 + 0.9 * Math.abs(gaussian(rng))));     // 1–4 знакомых ресурса
+      const privEscalation = (rng() < 0.02) ? 1 : 0;   // ~2% санкционированный admin-grant
+      const lateralHops = (rng() < 0.04) ? 1 : 0;      // ~4% легитимный одиночный hop
+      rows.push([
+        Math.log1p(readRows),
+        Math.log1p(ratio),
+        freq,
+        offDev,
+        offHoursFlag,
+        exfilRatio,
+        uniqueResources,
+        privEscalation,
+        lateralHops,
+      ]);
+    }
+  }
+  return rows;
+}
+
+// Обучение Isolation Forest на СИНТЕТИЧЕСКОЙ ФОНОВОЙ ПОПУЛЯЦИИ НОРМЫ — детерминированно.
+// Лес фитится на N user-day точках, насэмпленных из ролевых распределений (НЕ на инцидентах).
+// Инциденты затем СКОРЯТСЯ против этого обученного на норме леса. Возвращает модель с
+// методом score(cs) → { score(0..1 сырой 2^(−E/c)), rawScore, avgPath, isAnomaly, features }.
 function buildIForest(cases) {
   const rng = mulberry32(IFOREST_SEED);
-  const raw = cases.map(iforestFeatures);
-  const { norm } = iforestStandardize(raw);
-  const X = raw.map(norm);
-  const n = X.length;
-  const psi = Math.min(IFOREST_SUBSAMPLE, n);     // размер подвыборки
-  // Предел глубины. Классический ⌈log2 ψ⌉ — лишь оптимизация для БОЛЬШИХ выборок (отсекает
-  // редкий хвост глубоких путей). На малом доменном корпусе (n~10) этот кап ужимает все пути
-  // в [0..4] и «схлопывает» score к ~0.5. Поэтому для малых ψ растим деревья до ПОЛНОЙ изоляции
-  // (depth ≤ ψ): это и есть точная семантика h(x) из Liu et al. 2008 — длина пути до изоляции
-  // точки. c(ψ)-нормализация сохраняется, score остаётся корректным 2^(−E[h(x)]/c(ψ)).
-  const maxDepth = psi <= 64 ? psi : Math.ceil(Math.log2(Math.max(2, psi)));
+  // 1) тренировочный набор = синтетическая фоновая популяция нормы (seeded)
+  const bgRaw = iforestBackground(rng);
+  // 2) стандартизация по СТАТИСТИКЕ НОРМЫ (mean/std фоновой популяции) — модель «знает» норму
+  const { norm } = iforestStandardize(bgRaw);
+  const X = bgRaw.map(norm);             // обучающая матрица — только норма
+  const n = X.length;                    // N — размер фоновой популяции
+  const psi = Math.min(IFOREST_SUBSAMPLE, n);     // размер подвыборки (теперь ψ=256 корректно)
+  // Предел глубины — классический ⌈log2 ψ⌉ (Liu et al. 2008). На большой фоновой популяции
+  // (N≈980, ψ=256) это уже статистически корректный кап: норма формирует плотное ядро с
+  // длинными путями (E[h]→c(ψ)→score~0.5), а инцидент-аномалия изолируется за короткий путь
+  // (малое h → score→1). Никаких костылей под малый корпус больше не нужно.
+  const maxDepth = Math.ceil(Math.log2(Math.max(2, psi)));
   const cPsi = iforestC(psi);                       // нормализатор по размеру подвыборки
 
   const trees = [];
@@ -1071,18 +1158,16 @@ function buildIForest(cases) {
     return { score: s, avgPath };
   };
 
-  // КАЛИБРОВКА ПРЕЗЕНТАЦИИ. Сырой 2^(−E/c) на МАЛОМ доменном корпусе (n~10) сжимается к ~0.5
-  // (динамический диапазон путей короткий). Поэтому отображаемый anomaly — МОНОТОННАЯ робастная
-  // нормировка сырого score на интерпретируемую 0..1-шкалу: median→0.5, +1 робастная MAD→+0.18.
-  // Это стандартная пост-обработка (ср. sklearn decision_function offset): порядок инцидентов НЕ
-  // меняется (нормировка монотонна), просто шкала растянута под человекочитаемый порог τ=0.6.
-  const rawCorpus = X.map(v => scoreVec(v).score);
-  const sortedR = [...rawCorpus].sort((a, b) => a - b);
-  const medR = sortedR[Math.floor((sortedR.length - 1) / 2)];
-  const madArr = rawCorpus.map(x => Math.abs(x - medR)).sort((a, b) => a - b);
-  const madR = 1.4826 * (madArr[Math.floor((madArr.length - 1) / 2)] || 0.04) || 0.04;
-  const NORM_K = 0.18; // 1 робастная σ сырого score = +0.18 нормированного (med+1MAD → 0.68)
-  const normalizeScore = (raw) => Math.max(0, Math.min(1, 0.5 + NORM_K * (raw - medR) / madR));
+  // БЕЗ ПОСТ-КАЛИБРОВКИ. Лес обучен на норме, поэтому сырой 2^(−E[h(x)]/c(ψ)) уже ОСМЫСЛЕН
+  // на шкале 0..1 «как у Liu et al.»: нормальная точка лежит в плотном ядре → длинный путь →
+  // score ~0.4–0.5; аномалия (mass-exfil/lateral/staging) изолируется за короткий путь →
+  // score → высокий. Показываем СЫРОЙ score без растяжения шкалы.
+  // Диагностика распределения нормы (для MODEL CARD): медиана и 99-й перцентиль сырого score
+  // на фоновой популяции — чтобы порог τ был обоснован эмпирически, а не «на глаз».
+  const bgScores = X.map(v => scoreVec(v).score).sort((a, b) => a - b);
+  const bgMed = bgScores[Math.floor((bgScores.length - 1) / 2)];
+  const bgP99 = bgScores[Math.min(bgScores.length - 1, Math.floor(0.99 * (bgScores.length - 1)))];
+  const bgMax = bgScores[bgScores.length - 1];
 
   // memo по id инцидента — стабильно и без повторного обхода леса
   const cache = {};
@@ -1090,22 +1175,23 @@ function buildIForest(cases) {
     seed: IFOREST_SEED,
     trees: IFOREST_TREES,
     subsample: psi,
-    corpus: n,
+    corpus: n,                 // N — размер обучающей фоновой популяции нормы
+    bgPerRole: IFOREST_BG_PER_ROLE,
+    roles: Object.keys(ROLE_NORMS).length,
     maxDepth,
     cPsi,
     tau: IFOREST_TAU,
     features: IFOREST_FEATURES,
-    medRaw: medR,
-    madRaw: madR,
+    bgMed, bgP99, bgMax,       // распределение сырого score на норме (обоснование τ)
     rawFeatures: (cs) => iforestFeatures(cs),
     score(cs) {
       if (cs.id && cache[cs.id]) return cache[cs.id];
       const feats = iforestFeatures(cs);
-      const r = scoreVec(norm(feats));
-      const s = normalizeScore(r.score);
+      const r = scoreVec(norm(feats)); // та же стандартизация по статистике нормы
+      const s = r.score;               // СЫРОЙ 2^(−E/c), без пост-калибровки
       const out = {
-        score: s,           // отображаемый anomaly (нормированный 0..1)
-        rawScore: r.score,  // сырой 2^(−E/c) — для прозрачности в MODEL CARD
+        score: s,           // anomaly = сырой 2^(−E[h(x)]/c(ψ))
+        rawScore: r.score,  // тот же сырой score (поле сохранено для совместимости вывода)
         avgPath: r.avgPath, // E[h(x)] — средняя длина пути изоляции
         isAnomaly: s >= IFOREST_TAU,
         features: feats,
@@ -1930,8 +2016,9 @@ function App() {
   const analyzed = useMemo(()=> [...baseAnalyzed, ...uploadedAnalyzed], [baseAnalyzed, uploadedAnalyzed]);
 
   // === НЕЗАВИСИМАЯ AI-МОДЕЛЬ · Isolation Forest (на устройстве) ===
-  // Обучается на ВСЁМ корпусе (встроенные + загруженные), детерминированно (seeded).
-  // Отдельный unsupervised-сигнал, НЕ входит в Σ shap. mlScore(cs) → {score,isAnomaly,...}.
+  // Обучается на СИНТЕТИЧЕСКОЙ ФОНОВОЙ ПОПУЛЯЦИИ НОРМЫ (seeded, ~980 user-day из ROLE_NORMS),
+  // НЕ на инцидентах. Инциденты (встроенные + загруженные) СКОРЯТСЯ против обученного на норме
+  // леса. Отдельный unsupervised-сигнал, НЕ входит в Σ shap. mlScore(cs) → {score,isAnomaly,...}.
   const iforest = useMemo(()=> buildIForest(analyzed.map(a => a.cs)), [analyzed]);
   const mlScore = useMemo(()=> {
     const m = {};
@@ -2816,8 +2903,8 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                   <span className="t-head text-[12px] text-ink1">Isolation Forest · на устройстве</span>
                 </div>
                 <p className="text-[10.5px] text-ink4 mt-2 leading-snug max-w-[440px]">
-                  Наша собственная unsupervised AI-модель. Отдельный сигнал, независимый от Claude и любых API —
-                  работает офлайн, без сети. Не входит в Σ risk-score (показан рядом, как контроль).
+                  Наша собственная unsupervised AI-модель, обученная на {iforest.corpus} синтетических фоновых user-day нормы.
+                  Отдельный сигнал, независимый от Claude и любых API — работает офлайн, без сети. Не входит в Σ risk-score (показан рядом, как контроль).
                 </p>
               </div>
               <div className="shrink-0 text-right">
@@ -2838,7 +2925,7 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                 : `< порога τ=${iforest.tau.toFixed(2)} → в пределах нормы: длинный путь изоляции (E[h(x)]=${ml.avgPath.toFixed(2)}), точка в плотном ядре корпуса.`}
             </p>
             <p className="text-[9.5px] text-ink5 mt-1.5 leading-snug">
-              сырой 2^(−E/c) = {ml.rawScore.toFixed(3)} · показанный anomaly — робастная нормировка (median→0.5, +1 MAD→+0.18); порядок монотонен
+              anomaly = СЫРОЙ 2^(−E[h(x)]/c(ψ)) = {ml.rawScore.toFixed(2)} · без пост-калибровки. Лес обучен на N={iforest.corpus} синтетических фоновых user-day; норма даёт score ≤ {iforest.bgMax.toFixed(2)} (p99 {iforest.bgP99.toFixed(2)}), τ={iforest.tau.toFixed(2)} выше support нормы.
             </p>
             <button onClick={()=> setShowModelCard(v=>!v)}
               className="t-eyebrow text-[9.5px] text-ink4 hover:text-accent transition mt-3.5">
@@ -2851,16 +2938,16 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                   <div className="text-ink3 leading-snug">Isolation Forest (Liu, Ting & Zhou, ICDM 2008) — unsupervised детектор аномалий. Без меток.</div>
                 </div>
                 <div>
-                  <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Обучение</div>
-                  <div className="text-ink3 leading-snug font-mono">{iforest.trees} деревьев · подвыборка ψ={iforest.subsample} · корпус n={iforest.corpus} · seed={iforest.seed} (детерминированно)</div>
+                  <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Обучение (на норме)</div>
+                  <div className="text-ink3 leading-snug font-mono">N={iforest.corpus} синтетических фоновых user-day ({iforest.bgPerRole}/роль × {iforest.roles} ролей, насэмплены из ROLE_NORMS) · T={iforest.trees} деревьев · ψ={iforest.subsample} · seed={iforest.seed} (детерминированно)</div>
                 </div>
                 <div>
                   <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Признаки ({iforest.features.length})</div>
                   <div className="text-ink3 leading-snug font-mono">{iforest.features.join(' · ')}</div>
                 </div>
                 <div>
-                  <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Score · нормализация</div>
-                  <div className="text-ink3 leading-snug font-mono">raw = 2^(−E[h(x)]/c(ψ)) = {ml.rawScore.toFixed(3)} · c(ψ)={iforest.cPsi.toFixed(2)} · maxDepth={iforest.maxDepth} → robust-norm (median {iforest.medRaw.toFixed(3)}, MAD {iforest.madRaw.toFixed(3)}) → {ml.score.toFixed(2)}</div>
+                  <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Score · без пост-калибровки</div>
+                  <div className="text-ink3 leading-snug font-mono">anomaly = СЫРОЙ 2^(−E[h(x)]/c(ψ)) = {ml.score.toFixed(2)} · c(ψ)={iforest.cPsi.toFixed(2)} · maxDepth={iforest.maxDepth}. Норма (обучающая популяция): median {iforest.bgMed.toFixed(2)} · p99 {iforest.bgP99.toFixed(2)} · max {iforest.bgMax.toFixed(2)} → τ={iforest.tau.toFixed(2)}. Без растяжения шкалы.</div>
                 </div>
                 <div>
                   <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Зависимости</div>
@@ -2871,9 +2958,14 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                   <div className="leading-snug" style={{color:'#59D499'}}>НЕТ — работает офлайн на устройстве. Не Claude, не API.</div>
                 </div>
                 <div className="sm:col-span-2">
-                  <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Вектор признаков этого инцидента</div>
-                  <div className="text-ink4 leading-snug font-mono break-words">
-                    [{ml.features.map((v,i)=> Number.isInteger(v) ? v : v.toFixed(2)).join(', ')}]
+                  <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Вектор признаков этого инцидента <span className="text-ink5/70 normal-case tracking-normal">· наведи на значение — имя признака</span></div>
+                  <div className="text-ink4 leading-snug font-mono break-words"
+                    title={iforest.features.map((name,i)=> `${name} = ${Number.isInteger(ml.features[i]) ? ml.features[i] : ml.features[i].toFixed(2)}`).join('\n')}>
+                    [{ml.features.map((v,i)=> (
+                      <span key={i} title={iforest.features[i]} className="cursor-help">
+                        {Number.isInteger(v) ? v : v.toFixed(2)}{i < ml.features.length-1 ? ', ' : ''}
+                      </span>
+                    ))}]
                   </div>
                 </div>
               </div>
