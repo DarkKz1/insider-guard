@@ -2226,15 +2226,22 @@ function App() {
             <div className="relative console-frame corner-4 stat-tint rounded-xl px-7 py-8 mb-10 overflow-hidden">
               <span className="ctick tr"></span><span className="ctick bl"></span>
               <span className="pill-green rounded-md px-2.5 py-1 t-eyebrow text-[10px]">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> UEBA · поведенческий детект инсайдера
+                <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> Защита от инсайдерских утечек · UEBA
               </span>
-              <h2 className="t-head text-[27px] md:text-[33px] leading-[1.06] text-ink1 mt-5 max-w-[780px]">
-                Инсайдер с легальным доступом.<br/>
-                <span className="text-accent">Пойман по отклонению от baseline.</span>
+              <h2 className="t-head text-[27px] md:text-[33px] leading-[1.06] text-ink1 mt-5 max-w-[840px]">
+                Инсайдер с легальным доступом — брешь, которую DLP и SIEM не видят.<br/>
+                <span className="text-accent">Ловим за секунды. До выгрузки.</span>
               </h2>
-              <p className="text-[13px] text-ink3 mt-4 max-w-[580px] leading-relaxed">
-                Периметровый DLP/SIEM не видит «легального» доступа. Мы скорим каждое действие против персональной поведенческой нормы самого пользователя.
+              <p className="text-[13px] text-ink3 mt-4 max-w-[660px] leading-relaxed">
+                Именно так в РК слили 16,3 млн записей — не взлом, а легальный доступ. Insider Guard скорит активность против личной поведенческой нормы пользователя и ловит инсайдера <span className="text-ink1">до того, как данные уйдут</span> — объясняет каждое решение и отдаёт запечатанное досье, пригодное для следствия. On-prem, на вашем периметре.
               </p>
+              <div className="flex items-center gap-2 mt-5 flex-wrap t-eyebrow text-[10px] text-ink3">
+                <span className="rounded-md px-2.5 py-1" style={{border:'1px solid rgba(255,255,255,0.12)'}}><span className="text-accent">241 дн → секунды</span> · обнаружение</span>
+                <span className="rounded-md px-2.5 py-1" style={{border:'1px solid rgba(255,255,255,0.12)'}}>ловит, что DLP/SIEM пропускают</span>
+                <span className="rounded-md px-2.5 py-1" style={{border:'1px solid rgba(255,255,255,0.12)'}}>объяснимо · досье SHA-256 для суда</span>
+                <span className="rounded-md px-2.5 py-1" style={{border:'1px solid rgba(255,255,255,0.12)'}}>on-prem · Закон №94-V</span>
+              </div>
+              <p className="t-eyebrow text-[10px] text-ink4 mt-4">Для банков и госорганов — операторов ПДн РК под надзором АФМ / КНБ.</p>
               <div className="flex items-center gap-3 mt-7 flex-wrap">
                 <button onClick={()=> openIncident(queue[0].cs.id)} className="btn-green rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">Разобрать топ-инцидент ›</button>
                 <button onClick={()=> setMode('validation')} className="btn-ghost rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">Доказательство точности</button>
