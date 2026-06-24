@@ -27,6 +27,7 @@
 - **Реагирование видно сразу** — tiered-autonomy actions (AUTO/APPROVE/HIGH-RISK) + append-only hash-chain audit-log: ответ применяется и фиксируется в журнале мгновенно.
 - **Экспорт запечатанного досье** — выгрузка инцидента в `.json` с SHA-256 chain-of-custody (правка одного числа → `INTEGRITY BROKEN`).
 - **Честные rare-event метрики** — recall@topN / AUPRC / precision vs наивный DLP-порог, НЕ accuracy.
+- **Загрузка своего CSV access-лога → baseline из ваших данных** — перетащить лог во фронт или `POST /api/ingest`; движок считает per-user baseline (leave-one-day-out) из *ваших* событий, без предразметки. Готовый сэмпл для жюри — [`samples/`](samples/) ([`insider-access-log.csv`](samples/insider-access-log.csv)).
 
 ## Быстрый старт
 
@@ -134,6 +135,10 @@ CSV-пример:
 user,role,resource,db,host,ip,geo,action,rows,ts,channel,label
 u1,analyst,DB-PERSONS,persons,WS1,10.0.0.1,Астана,SELECT,80000,2026-06-12T02:14:00,db,1
 ```
+
+Готовый сэмпл для жюри (синтетика, 0 реальных ИИН): [`samples/insider-access-log.csv`](samples/insider-access-log.csv)
+— перетащить во фронт или прогнать через `/api/ingest`; baseline посчитается из этих данных, аномальный
+день (`aibek.analyst`) поднимется в топ очереди. Описание корпуса — [`samples/README.md`](samples/README.md).
 
 Upload:
 ```bash
