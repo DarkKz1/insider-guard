@@ -98,12 +98,17 @@ Insider Guard — это UEBA-движок обнаружения инсайде
 
 ## 6. Известные ограничения (честный scope MVP)
 
-- **Аутентификация/авторизация на уровне приложения отсутствует** — MVP рассчитан на
-  развёртывание за периметром организации (on-prem, доверенная сеть SOC). Для продакшена
-  следующий шаг — SSO/OIDC + RBAC перед `/api/*`.
-- **CORS открыт (`*`)** для удобства демо. В продакшене — заменить на конкретный origin.
-- **Rate-limiting** не включён в MVP; рекомендуется reverse-proxy (nginx) или
-  `express-rate-limit` при публичном развёртывании.
+- **Read-эндпоинты открыты by-design для on-prem MVP.** Запись (`POST /api/ingest`) защищена
+  опциональным Bearer-токеном (`INGEST_TOKEN`) и не перетирает seed-корпус для анонимных
+  загрузок. Read-эндпоинты (`/api/incidents`, `/api/report`, `/api/metrics`, `/api/dataset`)
+  намеренно открыты — MVP рассчитан на развёртывание **за периметром организации** (on-prem,
+  доверенная сеть SOC), где внешнего трафика нет. Для публичного продакшена следующий шаг —
+  SSO/OIDC + RBAC перед всеми `/api/*` + per-tenant изоляция датасетов.
+- **Rate-limiting включён** — `express-rate-limit` 100 req / 15 мин на `/api/*` (health исключён),
+  ключ по реальному client-IP (`trust proxy 1`).
+- **Security-заголовки** — `helmet` (HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+  и др.); CSP отключён, т.к. демо-прототип грузит вендоренные React/Babel/Tailwind на том же origin.
+- **CORS открыт** для удобства демо; в продакшене — конкретный origin.
 
 ---
 

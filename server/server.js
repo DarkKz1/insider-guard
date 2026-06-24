@@ -5,6 +5,7 @@
 const path = require('path');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 const pkg = require('../package.json');
 const store = require('./store');
 const { ensureSeed } = require('./bootstrap');
@@ -23,6 +24,13 @@ const PORT = process.env.PORT || 3000;
 // X-Forwarded-For instead of the proxy's address. '1' (not `true`) avoids the
 // permissive-trust setup that would let a client spoof its rate-limit key.
 app.set('trust proxy', 1);
+
+// --- security headers (helmet): HSTS, X-Frame-Options, X-Content-Type-Options,
+// Referrer-Policy, etc. CSP is disabled because the static demo (public/index.html)
+// loads vendored React/Babel/Tailwind + inline scripts on the same origin; a strict
+// CSP would break the prototype's in-browser transpile. API responses still gain
+// the rest of the hardening headers. ---
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // --- body parsing ---
 // Cap the JSON body to bound memory per request (DoS surface). 32 MB is ample
