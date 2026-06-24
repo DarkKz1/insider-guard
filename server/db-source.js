@@ -92,4 +92,8 @@ function sampleUsers(n = 30) {
     .map((r) => r.u);
 }
 
-module.exports = { db, DB_FILE, insertEvents, count, maxId, maxDay, readAll, readSinceId, clear, sampleUsers, rowToEvent };
+// async-safe init (parity with pg-source, which inits async). Sync under the hood.
+function init() { db(); return Promise.resolve(); }
+const backend = 'SQLite · node:sqlite · on-device';
+
+module.exports = { db, init, backend, DB_FILE, insertEvents, count, maxId, maxDay, readAll, readSinceId, clear, sampleUsers, rowToEvent };

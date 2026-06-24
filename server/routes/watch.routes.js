@@ -7,7 +7,7 @@
 //   POST /api/watch/reset   — wipe the DB table and re-seed the background corpus
 const express = require('express');
 const watcher = require('../watcher');
-const dbSource = require('../db-source');
+const source = require('../source');
 
 const router = express.Router();
 
@@ -24,9 +24,9 @@ router.post('/watch/start', async (req, res) => {
 
 router.post('/watch/stop', (req, res) => res.json({ ok: true, ...watcher.stop() }));
 
-router.post('/watch/inject', (req, res) => {
+router.post('/watch/inject', async (req, res) => {
   try {
-    const injected = watcher.inject();
+    const injected = await watcher.inject();
     res.json({ ok: true, injected, note: 'появится в очереди при следующем опросе БД' });
   } catch (e) {
     res.status(500).json({ error: 'inject failed', detail: e.message });
@@ -35,7 +35,8 @@ router.post('/watch/inject', (req, res) => {
 
 router.post('/watch/reset', async (req, res) => {
   try {
-    dbSource.clear();
+    await source.init();
+    await source.clear();
     const s = await watcher.start({ intervalMs: req.body && req.body.intervalMs });
     res.json({ ok: true, reset: true, ...s });
   } catch (e) {
