@@ -16,7 +16,7 @@ router.post('/report/:id', async (req, res) => {
   if (apiKey) {
     try {
       const text = await claudeReport(inc, apiKey);
-      return res.json({ id: inc.id, mode: 'claude', model: 'claude-sonnet-4-6', text });
+      return res.json({ id: inc.id, mode: 'claude', model: 'claude-opus-4-8', text });
     } catch (e) {
       // graceful fallback — never hard-fail
       const fallback =

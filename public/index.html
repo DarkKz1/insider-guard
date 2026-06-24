@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>AI Shield — Insider Guard · детект инсайдерской угрозы</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.5 4 5.5v6c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10v-6L12 2.5Z' fill='none' stroke='%2338E07B' stroke-width='1.6'/%3E%3Cpath d='M8.4 12.2l2.4 2.4 4.8-5' fill='none' stroke='%2338E07B' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
 <script src="./vendor/react.production.min.js"></script>
 <script src="./vendor/react-dom.production.min.js"></script>
 <script src="./vendor/babel.min.js"></script>
@@ -178,7 +179,7 @@ const { useState, useMemo, useEffect, useRef } = React;
 /* =====================================================================
    AI Shield — Insider Guard · прототип для трека AI Shield (id: ai-shield), AFM AI Hackathon 2026
    Полностью оффлайн. Детерминированный mock-AI (UEBA-граф + эвристики на baseline + scoring + SHAP-like).
-   Опционально: реальный вызов Claude (sonnet) для генерации черновика инцидент-отчёта.
+   Опционально: реальный вызов Claude (opus) для генерации черновика инцидент-отчёта.
    ВСЕ ДАННЫЕ СИНТЕТИЧЕСКИЕ. ИИН/ФИО/IP вымышлены. Никаких реальных персональных данных.
 
    Якорь: утечка 16,3 млн записей РК (июнь 2025) — НЕ взлом периметра, а инсайдер
@@ -386,11 +387,47 @@ const CASES = [
       { id:'E-9002', from:'U-AUDIT-1', to:'DB-SALARY', user:'U-AUDIT-1', role:'auditor', resource:'DB-SALARY', db:'salary', host:'H-WS-01', ip:'10.20.2.1', geo:'Астана', action:'SELECT', rows:2000, ts:'2026-06-12 14:05', channel:'db' },
     ],
   },
+
+  // 10. HONEYTOKEN / DECEPTION — доступ к ресурсу-приманке (decoy), которого нет ни в одном
+  // легитимном процессе. Детерминированный сигнал, 0% ложных тревог: override score=100 после скоринга.
+  {
+    id: 'INC-DECOY-1',
+    typology: 'honeytoken',
+    title: 'Сработала ловушка: доступ к decoy-ресурсу «зарплаты топ-менеджмента»',
+    channel: 'Журнал доступа БД + honeytoken-сенсор (deception layer)',
+    facts: 'Пользователь обратился к ресурсу-приманке DECOY-VIP-PAY — поддельной таблице «зарплаты топ-менеджмента», которая намеренно размещена как ловушка и НЕ фигурирует ни в одном легитимном бизнес-процессе. К этому ресурсу не обращается ни одна роль штатно, поэтому любой доступ к нему детерминированно вредоносен: 0% ложных тревог. Honeytoken — слой обмана (deception) поверх вероятностного UEBA: пол снизу, который инсайдер не может обойти поведенчески.',
+    source: 'MITRE ATT&CK T1546 (Deception / honeytoken trip). Детерминированный 0-FP сигнал: доступ к decoy-ресурсу, отсутствующему в любом легитимном процессе.',
+    hub: 'U-INSIDER-X',
+    users: [ usr('U-INSIDER-X', 'Неизв. пользователь (синт.)', 'analyst', { avg_rows_per_day: 200, work_hours: [9,18], known_tables: ['DB-REF'] }, []) ],
+    resources: [ rsc('DECOY-VIP-PAY', 'Ловушка: зарплаты топ-менеджмента (decoy)', 'decoy', 'critical', ['honeytoken']) ],
+    hosts: [ hst('H-WS-99', 'АРМ', 'office') ],
+    events: [
+      { id:'E-D001', from:'U-INSIDER-X', to:'DECOY-VIP-PAY', user:'U-INSIDER-X', role:'analyst', resource:'DECOY-VIP-PAY', db:'decoy', host:'H-WS-99', ip:'10.20.9.99', geo:'Астана', action:'SELECT', rows:1200, ts:'2026-06-14 13:37', channel:'db' },
+    ],
+  },
 ];
 
 // Ground-truth: какие инциденты реально нелегитимны (для честных метрик precision/recall).
 const BENIGN_TYPOLOGIES = new Set(['etl_service', 'planned_audit']);
-const isIllicit = (cs) => !BENIGN_TYPOLOGIES.has(cs.typology);
+// honeytoken трактуется как нелегитимный (illicit): доступ к ресурсу-приманке детерминированно вредоносен.
+const isIllicit = (cs) => cs.typology === 'honeytoken' || !BENIGN_TYPOLOGIES.has(cs.typology);
+
+/* ---------------------------------------------------------------------
+   MITRE ATT&CK lookup — типология инцидента → техника/тактика.
+   id-коды взяты из существующих строк source каждого кейса (T1530/T1021/…).
+   Benign-типологии (etl_service / planned_audit) намеренно отсутствуют → без бейджа.
+   --------------------------------------------------------------------- */
+const MITRE = {
+  mass_exfil:      { id:'T1530', tactic:'Collection' },
+  lateral:         { id:'T1021', tactic:'Lateral Movement' },
+  priv_escalation: { id:'T1098', tactic:'Privilege Escalation' },
+  off_hours:       { id:'T1078', tactic:'Valid Accounts' },
+  staging_exfil:   { id:'T1048', tactic:'Exfiltration' },
+  compromise:      { id:'T1566', tactic:'Initial Access' },
+  broad_access:    { id:'T1213', tactic:'Collection' },
+  honeytoken:      { id:'T1546', tactic:'Deception' },
+};
+const mitreFor = (cs) => MITRE[cs.typology] || null;
 
 // Кросс-связь инцидентов через общий скомпрометированный маркер: аккаунты/хосты с tag
 // 'compromised' или 'new_device' помечены как ранее фигурировавшие в другом инциденте —
@@ -636,13 +673,40 @@ function analyze(cs) {
   let score = Math.round(100 * (1 - Math.exp(-effRaw / 38)));
   score = Math.max(0, Math.min(100, score));
 
+  // --- HONEYTOKEN OVERRIDE (ПОСЛЕ обычного скоринга) ---
+  // Если в ресурсах кейса есть тег 'honeytoken' (или typology==='honeytoken'): доступ к
+  // ресурсу-приманке детерминированно вредоносен → score=100, приоритет crit. Вставляем
+  // DECEPTION_TRIPPED ПЕРВЫМ фактором с весом, равным остатку до Σ=score (чтобы аддитивность
+  // SHAP сходилась точно). Отменяем любой established-mitigation — ловушку контекст не спасает.
+  const honeytokenHit = cs.typology === 'honeytoken' ||
+    Object.values(nodes).some(n => (n.tags || []).includes('honeytoken'));
+  if (honeytokenHit) {
+    mitigation = null;
+    score = 100;
+    // вес остальных триггеров (если есть) сохраняем; DECEPTION_TRIPPED забирает остаток до 100.
+    const otherW = triggers.filter(t => t.weight > 0).reduce((s, t) => s + t.weight, 0);
+    const decW = Math.max(1, score - otherW); // вклад приманки = score минус вклад прочих
+    triggers.unshift({
+      code: 'DECEPTION_TRIPPED',
+      label: 'Сработала ловушка (honeytoken)',
+      weight: decW,
+      detail: 'Детерминированный сигнал, 0% ложных тревог: доступ к ресурсу-приманке, которого нет ни в одном легитимном процессе.',
+      severity: 'crit',
+    });
+    // убираем возможный CLEAN-плейсхолдер (вес 0) — он не нужен при сработавшей ловушке
+    const ci = triggers.findIndex(t => t.code === 'CLEAN');
+    if (ci >= 0) triggers.splice(ci, 1);
+  }
+
   // --- SHAP-like: вклад каждого триггера в финальный score (additive). ---
   // Largest-remainder (Hamilton): целочисленные доли, сумма которых ТОЧНО === score
   // (обычный Math.round по каждому даёт sum≠score из-за ошибок округления).
+  // ВАЖНО: пересчитываем sumW по актуальным триггерам (учитывает honeytoken-override).
   const shapBase = triggers.filter(t => t.weight > 0);
+  const shapSumW = shapBase.reduce((s, t) => s + t.weight, 0);
   let shap = [];
-  if (shapBase.length && sumW) {
-    const quotas = shapBase.map(t => ({ t, exact: (t.weight / sumW) * score }));
+  if (shapBase.length && shapSumW) {
+    const quotas = shapBase.map(t => ({ t, exact: (t.weight / shapSumW) * score }));
     quotas.forEach(q => { q.floor = Math.floor(q.exact); q.rem = q.exact - q.floor; });
     let assigned = quotas.reduce((s, q) => s + q.floor, 0);
     let leftover = score - assigned; // сколько целых очков ещё раздать
@@ -684,7 +748,36 @@ const RESPONSE = {
   broad_access: ['Отозвать сессию, временно сузить доступ аккаунта до его роли (least privilege).', 'Запросить у владельцев 12 БД подтверждение служебной необходимости (её, вероятно, нет).', 'Проверить, не предшествует ли это эксфильтрации; накопить и эскалировать при повторе.'],
   etl_service: ['Действий не требуется — паттерн соответствует established baseline сервис-аккаунта.', 'Сохранить как negative-пример для калибровки модели; убедиться, что ротация ключей сервис-аккаунта в норме.'],
   planned_audit: ['Действий не требуется — повышенный объём в рамках санкционированной плановой проверки.', 'Сохранить как negative-пример для калибровки; снять из очереди алертов.'],
+  honeytoken: ['Немедленно отозвать сессию и заблокировать аккаунт — сработала ловушка (детерминированный сигнал, 0% ложных).', 'Зафиксировать факт доступа к decoy-ресурсу как неоспоримое свидетельство умысла; снять образ АРМ для форензики.', 'Эскалация в CISO/КНБ: доступ к приманке вне любого легитимного процесса = подтверждённое злоупотребление.'],
 };
+
+/* ---------------------------------------------------------------------
+   SHA-256 TAMPER-SEAL (chain-of-custody досье)
+   Детерминированная канонизация инцидента в стабильный JSON (фикс. порядок ключей,
+   отсортированные events) → SHA-256 через WebCrypto. Полностью offline, без сети.
+   Меняем одно число в событии → хеш ≠ запечатанному → INTEGRITY BROKEN.
+   --------------------------------------------------------------------- */
+// Канонический JSON инцидента: стабильный порядок ключей верхнего уровня,
+// events отсортированы по (ts, resource, action) и сериализованы фиксированным набором полей.
+function canonicalIncident(cs, res, events) {
+  const evs = (events || cs.events)
+    .map(e => ({ ts: e.ts, rows: e.rows, action: e.action, resource: e.resource }))
+    .sort((a, b) =>
+      (a.ts || '').localeCompare(b.ts || '') ||
+      (a.resource || '').localeCompare(b.resource || '') ||
+      (a.action || '').localeCompare(b.action || ''));
+  // вручную собираем строку с детерминированным порядком ключей (не полагаемся на порядок вставки)
+  const evStr = evs.map(e =>
+    `{"ts":${JSON.stringify(e.ts)},"rows":${e.rows},"action":${JSON.stringify(e.action)},"resource":${JSON.stringify(e.resource)}}`
+  ).join(',');
+  return `{"id":${JSON.stringify(cs.id)},"hub":${JSON.stringify(cs.hub)},"score":${res.score},"events":[${evStr}]}`;
+}
+// SHA-256 hex канонической строки (WebCrypto, без сети).
+async function sealHash(cs, res, events) {
+  const canonical = canonicalIncident(cs, res, events);
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
 
 /* ---------------------------------------------------------------------
    ГЕНЕРАЦИЯ ЧЕРНОВИКА ИНЦИДЕНТ-ОТЧЁТА (IR report)
@@ -733,7 +826,7 @@ Risk-score: ${res.score}/100, приоритет ${res.priority.lvl}.
       'anthropic-dangerous-direct-browser-access': 'true',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-opus-4-8',
       max_tokens: 1100,
       system: sys,
       messages: [{ role:'user', content: user }],
@@ -1142,6 +1235,33 @@ function Tag({ children, sev='warn' }) {
   );
 }
 
+// MITRE ATT&CK бейдж — компактный моно-чип «ATT&CK · T1530 · Collection» в стиле системы.
+// size='sm' — маленький вариант для строки очереди (без слова ATT&CK, чтобы не перегружать).
+function MitreBadge({ cs, size='md' }) {
+  const m = mitreFor(cs);
+  if (!m) return null;
+  if (size === 'sm') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[9.5px] leading-none px-1.5 py-1 rounded-md font-mono font-semibold tracking-wide"
+        style={{ background:'rgba(56,224,123,0.07)', color:'#9FE7BC', border:'1px solid rgba(56,224,123,0.28)' }}
+        title={`MITRE ATT&CK · ${m.id} · ${m.tactic}`}>
+        <span className="font-bold" style={{color:'#38E07B'}}>{m.id}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10px] leading-none px-2 py-1 rounded-md font-mono font-semibold tracking-wide"
+      style={{ background:'rgba(56,224,123,0.07)', color:'#9FE7BC', border:'1px solid rgba(56,224,123,0.28)' }}
+      title={`MITRE ATT&CK · ${m.id} · ${m.tactic}`}>
+      <span className="text-[9px] uppercase tracking-[0.14em]" style={{color:'#59A877'}}>ATT&amp;CK</span>
+      <span className="text-ink5">·</span>
+      <span className="font-bold" style={{color:'#38E07B'}}>{m.id}</span>
+      <span className="text-ink5">·</span>
+      <span>{m.tactic}</span>
+    </span>
+  );
+}
+
 function App() {
   const analyzed = useMemo(()=> CASES.map(c => ({ cs:c, res:analyze(c) })), []);
   // сортировка очереди по убыванию score (приоритизация)
@@ -1353,8 +1473,9 @@ function App() {
                     <span className="block text-[15px] text-ink1 font-medium leading-snug truncate group-hover:text-white transition">{cs.title}</span>
                     <span className="block text-[11.5px] text-ink4 font-mono mt-1 truncate">{cs.id} · {cs.channel}</span>
                   </span>
-                  {/* 1-2 тега + статус-слово */}
+                  {/* 1-2 тега + статус-слово + MITRE-чип */}
                   <span className="hidden md:flex items-center gap-2 shrink-0">
+                    <MitreBadge cs={cs} size="sm" />
                     <Tag sev={res.priority.color}>{pLabel}</Tag>
                     <span className="text-[11px] font-mono uppercase tracking-wide" style={{color: res.priority.color==='good' ? '#9C9C9D' : c}}>
                       {SEV_LABEL[res.priority.color]}
@@ -1502,6 +1623,174 @@ function Validation({ threshold, setThreshold, m }) {
   );
 }
 
+// SHA-256 tamper-seal: «Запечатать досье» → хеш + UTC + статус ЦЕЛОСТНОСТЬ ПОДТВЕРЖДЕНА.
+// «Подделать запись» меняет rows первого события (+1) в локальном состоянии → пересчёт хеша →
+// если ≠ запечатанному → красный pill INTEGRITY BROKEN. Полностью offline/детерминированно.
+function TamperSeal({ cs, res }) {
+  const [sealedHash, setSealedHash] = useState(null);
+  const [sealedAt, setSealedAt] = useState(null);
+  const [events, setEvents] = useState(cs.events);
+  const [currentHash, setCurrentHash] = useState(null);
+  const [tampered, setTampered] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // при смене инцидента сбрасываем печать
+  useEffect(() => {
+    setSealedHash(null); setSealedAt(null); setEvents(cs.events);
+    setCurrentHash(null); setTampered(false);
+  }, [cs.id]);
+
+  const onSeal = async () => {
+    setBusy(true);
+    try {
+      const h = await sealHash(cs, res, cs.events);
+      setEvents(cs.events); setTampered(false);
+      setSealedHash(h); setCurrentHash(h);
+      setSealedAt(new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC');
+    } finally { setBusy(false); }
+  };
+
+  const onTamper = async () => {
+    setBusy(true);
+    try {
+      // подделываем первое событие: rows +1 — единственная правка, ломающая целостность
+      const next = events.map((e, i) => i === 0 ? { ...e, rows: e.rows + 1 } : e);
+      setEvents(next); setTampered(true);
+      const h = await sealHash(cs, res, next);
+      setCurrentHash(h);
+    } finally { setBusy(false); }
+  };
+
+  const broken = sealedHash && currentHash && currentHash !== sealedHash;
+  const fmtHash = (h) => h ? h.match(/.{1,8}/g).join(' ') : '';
+
+  return (
+    <div className="relative console-frame corner-4 rounded-xl px-7 py-7 bg-panel/40">
+      <span className="ctick tr"></span><span className="ctick bl"></span>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <span className="pill-green rounded-md px-2.5 py-1 t-eyebrow text-[10px]">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> Chain-of-custody · SHA-256
+          </span>
+          <h3 className="t-head text-[15px] text-ink1 mt-4">Криптографическая печать досье</h3>
+          <p className="text-[12px] text-ink4 mt-2 max-w-[520px] leading-relaxed">
+            Детерминированный хеш канонизированного инцидента — досье воспроизводимо бит-в-бит, пригодно как доказательство. Полностью офлайн.
+          </p>
+        </div>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button onClick={onSeal} disabled={busy}
+            className="btn-green rounded-lg px-5 py-2.5 t-eyebrow text-[11px] disabled:opacity-50">
+            {sealedHash ? '↻ Перезапечатать' : 'Запечатать досье'}
+          </button>
+        </div>
+      </div>
+
+      {sealedHash && (
+        <div className="mt-6 fade-in">
+          {/* статус целостности */}
+          <div className="flex items-center gap-2.5 flex-wrap mb-4">
+            {broken ? (
+              <span className="inline-flex items-center gap-2 text-[11px] leading-none px-3 py-1.5 rounded-md font-mono font-bold uppercase tracking-wide"
+                style={{ background:'rgba(255,97,97,0.12)', color:'#FF6161', border:'1px solid rgba(255,97,97,0.5)' }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{background:'#FF6161'}}></span>
+                INTEGRITY BROKEN
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-2 text-[11px] leading-none px-3 py-1.5 rounded-md font-mono font-bold uppercase tracking-wide"
+                style={{ background:'rgba(89,212,153,0.12)', color:'#59D499', border:'1px solid rgba(89,212,153,0.5)' }}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{background:'#59D499'}}></span>
+                Целостность подтверждена
+              </span>
+            )}
+            <span className="font-mono text-[10.5px] text-ink4">{sealedAt}</span>
+          </div>
+
+          {/* запечатанный хеш */}
+          <div className="space-y-3">
+            <div>
+              <div className="t-eyebrow text-[9.5px] text-ink5 mb-1.5">Запечатанный SHA-256</div>
+              <div className="font-mono text-[11px] leading-relaxed break-all" style={{color: broken ? '#9C9C9D' : '#59D499'}}>
+                {fmtHash(sealedHash)}
+              </div>
+            </div>
+            {broken && (
+              <div className="fade-in">
+                <div className="t-eyebrow text-[9.5px] mb-1.5" style={{color:'#FF6161'}}>Текущий SHA-256 (после правки)</div>
+                <div className="font-mono text-[11px] leading-relaxed break-all" style={{color:'#FF6161'}}>
+                  {fmtHash(currentHash)}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* контрол подделки */}
+          <div className="mt-6 flex items-center gap-3 flex-wrap">
+            <button onClick={onTamper} disabled={busy}
+              className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px] disabled:opacity-50"
+              style={broken ? undefined : { borderColor:'rgba(255,97,97,0.45)' }}>
+              ⚠ Подделать запись (rows +1)
+            </button>
+            {tampered && (
+              <span className="text-[11px] font-mono" style={{color: broken ? '#FF6161' : '#9C9C9D'}}>
+                {broken
+                  ? `Изменено: ${events[0].resource} · rows → ${fmt(events[0].rows)} — хеш не совпал.`
+                  : 'Запись изменена.'}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Kill-chain ribbon — горизонтальная лента тактик в порядке kill-chain. Подсвечивает зелёным
+// тактики, задетые инцидентом (выводим из typology/MITRE-тактики + триггеров/graphStats).
+const KILLCHAIN = ['Initial Access', 'Privilege Escalation', 'Defense Evasion', 'Lateral Movement', 'Collection', 'Exfiltration'];
+function touchedTactics(cs, res) {
+  const set = new Set();
+  const m = mitreFor(cs);
+  if (m && KILLCHAIN.includes(m.tactic)) set.add(m.tactic);
+  // выводим дополнительные тактики из сработавших триггеров и графа
+  const codes = new Set((res.triggers || []).map(t => t.code));
+  if (codes.has('LATERAL_MOVEMENT') || res.graphStats.cycle) set.add('Lateral Movement');
+  if (codes.has('PRIV_ESCALATION')) set.add('Privilege Escalation');
+  if (codes.has('COMPROMISE_INDICATORS')) set.add('Initial Access');
+  if (codes.has('VOLUME_ANOMALY') || codes.has('BROAD_ACCESS') || codes.has('SENSITIVE_ACCESS')) set.add('Collection');
+  if (codes.has('BULK_EXFIL') || codes.has('STAGING_EXFIL') || codes.has('COVERT_CHANNEL')) set.add('Exfiltration');
+  return set;
+}
+function KillChainRibbon({ cs, res }) {
+  const hit = touchedTactics(cs, res);
+  return (
+    <div>
+      <div className="t-eyebrow text-[10px] text-ink5 mb-3">Kill-chain · MITRE ATT&amp;CK</div>
+      <div className="flex items-stretch gap-1.5 flex-wrap">
+        {KILLCHAIN.map((tac, i) => {
+          const on = hit.has(tac);
+          return (
+            <div key={tac} className="flex items-center gap-1.5">
+              <div className="rounded-md px-2.5 py-2 leading-tight transition"
+                style={on
+                  ? { background:'rgba(56,224,123,0.10)', border:'1px solid rgba(56,224,123,0.42)', color:'#9FE7BC' }
+                  : { background:'transparent', border:'1px solid rgba(255,255,255,0.10)', color:'#6A6B6C' }}>
+                <div className="flex items-center gap-1.5">
+                  {on && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{background:'#38E07B'}}></span>}
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap"
+                    style={on ? {color:'#38E07B'} : undefined}>{tac}</span>
+                </div>
+              </div>
+              {i < KILLCHAIN.length - 1 && (
+                <span className="text-[12px] leading-none" style={{color: on ? '#38E07B' : '#434345'}}>›</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genSAR, onSelect, onBack }) {
   const related = relatedCases(cs);
   const pc = SEV[res.priority.color];
@@ -1540,9 +1829,10 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
       {/* ЗАГОЛОВОК + ОДИН крупный score-ring + приоритет */}
       <div className="flex items-start justify-between gap-8 flex-wrap mb-12">
         <div className="flex-1 min-w-[300px]">
-          <div className="flex items-center gap-2.5 mb-3">
+          <div className="flex items-center gap-2.5 mb-3 flex-wrap">
             <span className="font-mono text-[12px] text-ink4">{cs.id}</span>
             <Tag sev={res.priority.color}>{res.priority.lvl}</Tag>
+            <MitreBadge cs={cs} />
           </div>
           <h2 className="text-[26px] font-extrabold tracking-tightest text-ink1 leading-tight">{cs.title}</h2>
           <p className="text-[12px] text-ink4 mt-3 font-mono">
@@ -1566,6 +1856,9 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
             : <span className="text-[10px] font-mono uppercase tracking-wide" style={{color:'#FFC533'}}>● путь к данным</span>}
         </div>
         <GraphView cs={cs} res={res} />
+        <div className="mt-6">
+          <KillChainRibbon cs={cs} res={res} />
+        </div>
       </section>
 
       {/* ПОЧЕМУ ПОМЕЧЕНО — только топ-3, остальное по кнопке */}
@@ -1650,7 +1943,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
               </div>
               {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='claude'?'#59D499':'#FFC533'}}>
                 <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='claude'?'#59D499':'#FFC533'}}></span>
-                {sarMode==='claude' ? 'Сгенерировано через Claude (claude-sonnet-4-6)' : 'Mock-режим (детерминированный шаблон, без сети)'}
+                {sarMode==='claude' ? 'Сгенерировано через Claude (claude-opus-4-8)' : 'Mock-режим (детерминированный шаблон, без сети)'}
               </p>}
               {sarText
                 ? <pre className="scanline text-[11.5px] text-ink2 whitespace-pre-wrap leading-relaxed bg-panel rounded-xl p-5 border border-edge font-mono fade-in">{sarText}</pre>
@@ -1658,6 +1951,11 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
             </div>
           </div>
         )}
+      </section>
+
+      {/* ДОКАЗАТЕЛЬСТВО — SHA-256 tamper-seal (chain-of-custody) */}
+      <section className="mt-14 max-w-[760px]">
+        <TamperSeal cs={cs} res={res} />
       </section>
 
       <p className="text-[10px] text-ink5 mt-16 leading-snug">⚠ Все данные синтетические (ИИН / ФИО / IP вымышлены). Прототип для AFM AI Hackathon 2026.</p>

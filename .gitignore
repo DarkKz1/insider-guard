@@ -7,4 +7,6 @@ data/.store.*.tmp
 *.log
 .DS_Store
 .env
-.vercel
+.vercel/
+.playwright-mcp/
+*.bak
