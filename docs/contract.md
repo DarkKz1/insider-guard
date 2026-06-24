@@ -85,7 +85,7 @@ Layout is computed client-side; the server only ships nodes+edges+cycle+kinds. `
 ## REPORT
 
 ### `POST /api/report/:id`  body `{ apiKey? }`
-`{ id, mode:"claude"|"mock", model?:"claude-sonnet-4-6", text }`. If a Claude call fails → graceful fallback `mode:"mock"` (never hard-fail).
+`{ id, mode:"claude"|"mock", model?:"claude-opus-4-8", text }`. If a Claude call fails → graceful fallback `mode:"mock"` (never hard-fail).
 
 ---
 

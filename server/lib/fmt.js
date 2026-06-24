@@ -69,4 +69,26 @@ function percentile(values, p) {
   return arr[lo] * (1 - frac) + arr[hi] * frac;
 }
 
-module.exports = { fmt, hourOf, dowOf, dayOf, minutesBetween, trimmedMean, median, percentile };
+// Robust modified z-score via Median Absolute Deviation (MAD).
+// Unsupervised: flags points that deviate from the cohort median without any
+// labels or fitted threshold. z = 0.6745 * (x - median) / MAD  (1.4826*MAD≈σ).
+// Returns one score per input value, aligned by index. When MAD === 0 (>50%
+// of points identical), falls back to mean-absolute-deviation so a lone
+// outlier among constant values is still surfaced rather than divided by zero.
+function madZScores(values) {
+  const arr = values.filter((v) => Number.isFinite(v));
+  if (arr.length === 0) return values.map(() => 0);
+  const med = median(arr);
+  const absDev = arr.map((v) => Math.abs(v - med));
+  let mad = median(absDev);
+  let scale;
+  if (mad > 0) {
+    scale = 0.6745 / mad; // standard modified z-score
+  } else {
+    const meanAbsDev = absDev.reduce((s, v) => s + v, 0) / absDev.length;
+    scale = meanAbsDev > 0 ? 0.7979 / meanAbsDev : 0; // MAD degenerate → MeanAD
+  }
+  return values.map((v) => (Number.isFinite(v) ? (v - med) * scale : 0));
+}
+
+module.exports = { fmt, hourOf, dowOf, dayOf, minutesBetween, trimmedMean, median, percentile, madZScores };

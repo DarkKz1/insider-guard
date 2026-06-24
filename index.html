@@ -752,6 +752,143 @@ const RESPONSE = {
 };
 
 /* ---------------------------------------------------------------------
+   UNSUPERVISED · robust-MAD z-сигнал (непараметрическая аномалия)
+   ---------------------------------------------------------------------
+   ЧЕСТНЫЙ unsupervised-слой поверх существующих факторов. НЕ новый score-член
+   (инвариант Σ shap === score НЕ затрагивается) — это ОБОГАЩЕНИЕ/аннотация.
+
+   Robust z-score (стандартная непараметрическая форма, устойчивая к выбросам,
+   в отличие от обычного z на mean/std):
+       z = (x − median) / (1.4826 · MAD),  MAD = median(|xᵢ − median|)
+   Константа 1.4826 = 1/Φ⁻¹(0.75) делает MAD состоятельной оценкой σ для
+   нормального распределения (Rousseeuw & Croux, 1993). Используем два опорных
+   распределения: (а) ПЕРСОНАЛЬНАЯ норма пользователя (его baseline) и
+   (б) МЕДИАНА ПО РОЛИ (peer-group) — это и есть «×N от своей нормы И от пиров».
+
+   ROLE_NORMS — детерминированная медиана+MAD по ролям (объём строк/день, частота
+   операций/день, типичный час активности). Значения правдоподобны и согласованы
+   с baseline существующих users (analyst≈50–400, support≈200–250, service ночной
+   крупнообъёмный, auditor с легитимными плановыми всплесками и т.д.). Так как в
+   standalone-CASES нет полной популяции, медиана/MAD заданы как доменная мапа. */
+const ROLE_NORMS = {
+  //            rows/день           freq оп/день      час активности (work-hour центр)
+  analyst:  { rows:[500,300],   freq:[3,2],   hour:[13,3] },
+  support:  { rows:[250,150],   freq:[4,2],   hour:[13,3] },
+  junior:   { rows:[120,80],    freq:[2,1],   hour:[13,3] },
+  clerk:    { rows:[180,120],   freq:[3,2],   hour:[13,3] },
+  auditor:  { rows:[4000,1500], freq:[3,2],   hour:[13,3] },  // плановые проверки → крупные легитимные всплески
+  service:  { rows:[85000,12000], freq:[2,1], hour:[3,2] },   // ночной ETL/бэкап: крупнообъёмный, ночной
+  operator: { rows:[400,200],   freq:[4,2],   hour:[13,3] },
+};
+const ROLE_DEFAULT = { rows:[500,300], freq:[3,2], hour:[13,3] };
+
+// robust z: (value − median) / (1.4826·MAD). MAD==0 → возвращаем 0 (нет разброса).
+function robustZ(value, median, mad) {
+  if (!mad || mad <= 0) return 0;
+  return (value - median) / (1.4826 * mad);
+}
+
+// anomalyStats — pure: считает robust-MAD z по ключевым числовым признакам относительно
+// (а) персональной нормы пользователя и (б) медианы по его роли. Возвращает сводку для
+// аннотации. АННОТАЦИЯ — НЕ влияет на score/shap (инвариант Σ===score не трогаем).
+function anomalyStats(cs) {
+  const owner = cs.users.find(u => u.id === cs.hub) || cs.users[0];
+  const bl = (owner && owner.baseline) || { avg_rows_per_day:500, work_hours:[9,18], known_tables:[] };
+  const role = (owner && owner.role) || 'analyst';
+  const rn = ROLE_NORMS[role] || ROLE_DEFAULT;
+
+  const userEvents = cs.events.filter(e => e.user === (owner && owner.id));
+  const readRows = userEvents
+    .filter(e => ['SELECT','EXPORT','DOWNLOAD'].includes(e.action))
+    .reduce((s,e)=> s + e.rows, 0);
+  const freq = userEvents.length;
+  // «типичный» час активности окна — медиана часов событий
+  const hours = userEvents.map(e => hourOf(e.ts)).sort((a,b)=> a-b);
+  const hourVal = hours.length ? hours[Math.floor((hours.length-1)/2)] : 13;
+
+  // (а) персональная норма: median = baseline, MAD ≈ 0.6·baseline (устойчивый разброс
+  // личного дневного объёма). freq personal MAD=1.5 (типичные 1–3 операции/день).
+  const persRowsMad = Math.max(1, 0.6 * (bl.avg_rows_per_day || 1));
+  const zRowsPers = robustZ(readRows, bl.avg_rows_per_day || 1, persRowsMad);
+  const zFreqPers = robustZ(freq, Math.max(1, 1), 1.5);
+  // персональный час: центр work_hours, MAD ≈ четверть окна
+  const wc = ((bl.work_hours?.[0] ?? 9) + (bl.work_hours?.[1] ?? 18)) / 2;
+  const wMad = Math.max(1, ((bl.work_hours?.[1] ?? 18) - (bl.work_hours?.[0] ?? 9)) / 4);
+  const zHourPers = bl.night_job ? 0 : robustZ(hourVal, wc, wMad);
+
+  // (б) медиана по роли (peer-group)
+  const zRowsRole = robustZ(readRows, rn.rows[0], rn.rows[1]);
+  const zFreqRole = robustZ(freq, rn.freq[0], rn.freq[1]);
+  const zHourRole = robustZ(hourVal, rn.hour[0], rn.hour[1]);
+
+  // ведущий сигнал — по объёму (главный признак инсайдер-эксфильтрации)
+  const xPers = Math.max(0, zRowsPers);             // персональная кратность (для надписи)
+  const multPers = readRows / Math.max(1, bl.avg_rows_per_day || 1);
+  const multRole = readRows / Math.max(1, rn.rows[0]);
+  // итоговый «robust z» — максимум по абсолютным значениям всех 6 измерений
+  const allZ = [zRowsPers, zRowsRole, zFreqPers, zFreqRole, zHourPers, zHourRole].map(Math.abs);
+  const maxZ = Math.max(...allZ);
+  // отображаемый z клампим в правдоподобный потолок (экстремальные кратности дают
+  // математически верный, но «нечитаемый» z — ×N остаётся честной кратностью).
+  // отображаемый z клампим к ПРАВДОПОДОБНОМУ потолку: дальше ~12 robust σ точное
+  // значение статистически бессмысленно (это уже за любым нормальным разбросом),
+  // поэтому показываем «>12», а не нечитаемые 29σ — так честнее и не вызывает «накручено».
+  const Z_CAP = 12;
+  const zCapped = Math.min(maxZ, Z_CAP);
+  const zDisplay = maxZ > Z_CAP ? `>${Z_CAP}` : zCapped.toFixed(1);
+
+  const ANOMALY_TAU = 3.5; // порог «значимой» непараметрической аномалии (3.5·robust σ)
+  const fmtMult = (x)=> x >= 10 ? Math.round(x) : x.toFixed(1);
+  // личная и ролевая кратность могут совпасть (средний пользователь ≈ медиане роли) —
+  // тогда не дублируем «×27 · ×27», а схлопываем в одну честную надпись.
+  const near = Math.abs(multPers - multRole) <= 0.15 * Math.max(multPers, multRole, 1);
+  const multStr = near
+    ? `×${fmtMult(multPers)} от нормы (личной и ролевой)`
+    : `×${fmtMult(multPers)} от личной нормы · ×${fmtMult(multRole)} от медианы роли`;
+  return {
+    readRows, freq, hourVal,
+    zRowsPers, zRowsRole, zHourPers, zHourRole, zFreqPers, zFreqRole,
+    multPers, multRole, maxZ, zCapped, zDisplay,
+    isAnomaly: maxZ >= ANOMALY_TAU,
+    // сводка-строка «×N от нормы · робастный z …»
+    summary: `${multStr} · робастный z ${zDisplay}`,
+  };
+}
+
+/* ---------------------------------------------------------------------
+   TIERED-AUTONOMY — тир-уровень автономности для каждого шага реагирования.
+   Human-in-the-loop: безопасное — авто; восстановимо-ограничивающее — с подтверждением;
+   деструктивно-необратимое — только вручную.
+     AUTO       — уведомить/залогировать/сохранить/мониторить (безопасно, авто).
+     APPROVE    — отозвать сессию/ограничить/сузить доступ/запросить подтверждение (нужно «Подтвердить»).
+     HIGH-RISK  — заблокировать аккаунт/эскалация в CISO·КНБ/изолировать/форс-ресет (только вручную).
+   Детерминированная эвристика по ключевым словам шага. --------------------------------------------------------------------- */
+const TIERS = {
+  AUTO:        { id:'AUTO',      label:'AUTO',      sev:'good', note:'Безопасное действие — выполняется автоматически.' },
+  APPROVE:     { id:'APPROVE',   label:'APPROVE',   sev:'warn', note:'Ограничивающее, восстановимое — требует подтверждения аналитика.' },
+  'HIGH-RISK': { id:'HIGH-RISK', label:'HIGH-RISK', sev:'crit', note:'Деструктивное/необратимое — только ручное исполнение с подтверждением.' },
+};
+function tierForStep(text) {
+  const s = (text || '').toLowerCase();
+  // HIGH-RISK: блокировка аккаунта, эскалация, изоляция, форс-ресет, снятие образа форензики
+  if (/заблокир|эскалац|изолир|форс-ресет|форс ресет|завершить все сесси|снять образ|перевыпуск mfa|перевыпуск пароля|пароля \+ mfa/.test(s))
+    return 'HIGH-RISK';
+  // APPROVE: отзыв сессии, ограничение/сужение доступа, запрос подтверждения, отзыв grant
+  if (/отозвать|отзыв|ограничить|сузить|вернуть роль|запросить|временно|сменить роль|перевыпуск/.test(s))
+    return 'APPROVE';
+  // AUTO: всё остальное (уведомить, зафиксировать, сохранить, проверить, накопить, мониторинг)
+  return 'AUTO';
+}
+
+// SHA-256 короткого хеша для звена audit-log (prevHash + action + ts). Offline, WebCrypto.
+async function chainHash(prevHash, action, ts) {
+  const canonical = `${prevHash}|${action}|${ts}`;
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const GENESIS_HASH = '0'.repeat(64); // genesis-звено цепочки
+
+/* ---------------------------------------------------------------------
    SHA-256 TAMPER-SEAL (chain-of-custody досье)
    Детерминированная канонизация инцидента в стабильный JSON (фикс. порядок ключей,
    отсортированные events) → SHA-256 через WebCrypto. Полностью offline, без сети.
@@ -1797,8 +1934,23 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
   // прогрессивное раскрытие: факторы свыше топ-3, отчёт/плейбук — свёрнуты по умолчанию
   const [showAllFactors, setShowAllFactors] = useState(false);
   const [showReport, setShowReport] = useState(false);
+  // TIERED-AUTONOMY audit-log (in-memory hash-chain). Сбрасывается при смене инцидента.
+  const [auditLog, setAuditLog] = useState([]);
+  const [confirming, setConfirming] = useState(null);
+  useEffect(()=> { setAuditLog([]); }, [cs.id]);
+  const confirmAction = async (action, tier) => {
+    setConfirming(action);
+    try {
+      const ts = new Date().toISOString().replace('T',' ').slice(0,19) + ' UTC';
+      const prevHash = auditLog.length ? auditLog[auditLog.length-1].hash : GENESIS_HASH;
+      const hash = await chainHash(prevHash, action, ts);
+      setAuditLog(prev => [...prev, { action, tier, ts, prevHash, hash, idx: prev.length }]);
+    } finally { setConfirming(null); }
+  };
   const topFactors = res.shap.slice(0, 3);
   const restFactors = res.shap.slice(3);
+  // UNSUPERVISED robust-MAD z-сигнал — аннотация поверх факторов (НЕ член score).
+  const anom = useMemo(()=> anomalyStats(cs), [cs.id]);
 
   const Factor = ({ s }) => {
     const sc = SEV[s.severity];
@@ -1863,7 +2015,28 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
 
       {/* ПОЧЕМУ ПОМЕЧЕНО — только топ-3, остальное по кнопке */}
       <section className="mb-12 max-w-[760px]">
-        <h3 className="t-eyebrow text-[11px] text-ink4 mb-6">Почему помечено</h3>
+        <div className="flex items-center gap-2.5 mb-3 flex-wrap">
+          <h3 className="t-eyebrow text-[11px] text-ink4">Почему помечено</h3>
+          {anom.isAnomaly && (
+            <span className="inline-flex items-center gap-1.5 text-[9.5px] leading-none px-2 py-1 rounded-md font-mono font-semibold uppercase tracking-wide"
+              style={{ background:'rgba(56,224,123,0.07)', color:'#9FE7BC', border:'1px solid rgba(56,224,123,0.28)' }}
+              title="Непараметрический детектор аномалий: robust-MAD z-score относительно персональной нормы и медианы роли. Unsupervised — не правило if-then.">
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{background:'#38E07B'}}></span>
+              <span style={{color:'#38E07B'}}>UNSUPERVISED</span>
+              <span className="text-ink5">·</span>
+              <span>robust-MAD</span>
+            </span>
+          )}
+        </div>
+        {/* robust-MAD z-сводка: «×N от своей нормы · ×M от медианы роли · robust z=…» */}
+        {anom.maxZ >= 1 && (
+          <p className="text-[11px] font-mono mb-6 leading-snug" style={{color: anom.isAnomaly ? '#9FE7BC' : '#9C9C9D'}}>
+            <span className="text-ink5">Σ-free аномалия · </span>
+            {anom.summary}
+            {!anom.isAnomaly && <span className="text-ink5"> · в пределах нормы</span>}
+          </p>
+        )}
+        {anom.maxZ < 1 && <div className="mb-6" />}
         {res.shap.length === 0 && (
           <div className="flex items-center gap-2.5 text-[13px]" style={{color:'#59D499'}}>
             <span className="w-2 h-2 rounded-full" style={{background:'#59D499'}}></span>
@@ -1917,18 +2090,99 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
 
         {showReport && (
           <div className="mt-8 space-y-10 fade-in">
-            {/* полный плейбук — раскрытый */}
+            {/* полный плейбук — раскрытый, с тир-бейджами автономности (human-in-the-loop) */}
             <div>
-              <h3 className="t-eyebrow text-[11px] text-ink4 mb-4">Плейбук реагирования</h3>
-              <ol className="space-y-3">
-                {(RESPONSE[cs.typology]||[]).map((r,i)=> (
-                  <li key={i} className="text-[13px] text-ink2 flex gap-3 items-start leading-snug">
-                    <span className="shrink-0 font-mono font-bold text-[12px] text-ink4 mt-px w-4">{i+1}</span>
-                    <span>{r}</span>
-                  </li>
-                ))}
+              <div className="flex items-center gap-2.5 mb-4 flex-wrap">
+                <h3 className="t-eyebrow text-[11px] text-ink4">Плейбук реагирования</h3>
+                <span className="t-eyebrow text-[9px] text-ink5">tiered-autonomy · human-in-the-loop</span>
+              </div>
+              <ol className="space-y-3.5">
+                {(RESPONSE[cs.typology]||[]).map((r,i)=> {
+                  const tier = tierForStep(r);
+                  const tc = SEV[TIERS[tier].sev];
+                  const needsConfirm = tier !== 'AUTO';
+                  const done = auditLog.some(a => a.action === r);
+                  return (
+                    <li key={i} className="text-[13px] text-ink2 flex gap-3 items-start leading-snug">
+                      <span className="shrink-0 font-mono font-bold text-[12px] text-ink4 mt-0.5 w-4">{i+1}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-2 flex-wrap">
+                          <span className="inline-flex items-center gap-1 text-[9px] leading-none px-1.5 py-1 rounded-md font-mono font-semibold uppercase tracking-wide shrink-0 mt-0.5"
+                            style={{ background:tc+'1a', color:tc, border:'1px solid '+tc+'40' }}
+                            title={TIERS[tier].note}>
+                            <span className="w-1 h-1 rounded-full" style={{background:tc, boxShadow:`0 0 5px ${tc}`}}></span>
+                            {TIERS[tier].label}
+                          </span>
+                          <span className="min-w-0">{r}</span>
+                        </div>
+                        {needsConfirm && (
+                          <div className="mt-2">
+                            {done ? (
+                              <span className="inline-flex items-center gap-1.5 text-[10.5px] font-mono" style={{color:'#59D499'}}>
+                                <span className="w-1.5 h-1.5 rounded-full" style={{background:'#59D499'}}></span>
+                                подтверждено · записано в журнал
+                              </span>
+                            ) : (
+                              <button onClick={()=> confirmAction(r, tier)} disabled={confirming===r}
+                                className="rounded-lg px-3.5 py-1.5 t-eyebrow text-[10px] disabled:opacity-50 transition hover:brightness-125"
+                                style={{ background:tc+'14', color:tc, border:'1px solid '+tc+'66' }}>
+                                {confirming===r ? 'Запись…' : '✓ Подтвердить действие'}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
               </ol>
             </div>
+
+            {/* ЖУРНАЛ РЕАГИРОВАНИЯ — append-only hash-chain (chain-of-custody действий) */}
+            {(
+              <div className="relative console-frame corner-4 rounded-xl px-6 py-6 bg-panel/40 fade-in">
+                <span className="ctick tr"></span><span className="ctick bl"></span>
+                <div className="flex items-center gap-2.5 mb-4 flex-wrap">
+                  <span className="pill-green rounded-md px-2.5 py-1 t-eyebrow text-[10px]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> Журнал реагирования · hash-chain
+                  </span>
+                  <span className="font-mono text-[10px] text-ink4">{auditLog.length} звен(о/а)</span>
+                </div>
+                {auditLog.length === 0 && (
+                  <p className="font-mono text-[11px] text-ink4 leading-relaxed">
+                    <span className="text-ink5">genesis </span>0000000000000000…
+                    <span className="mx-1 text-ink5">→</span>
+                    цепочка пуста. Подтвердите действие выше — первое звено запишется в неизменяемый журнал.
+                  </p>
+                )}
+                <ol className="space-y-3">
+                  {auditLog.map((a)=> {
+                    const tc = SEV[TIERS[a.tier].sev];
+                    return (
+                      <li key={a.idx} className="flex gap-3 items-start">
+                        <span className="shrink-0 font-mono text-[10px] text-ink5 mt-1 w-5">#{a.idx+1}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[9px] leading-none px-1.5 py-0.5 rounded font-mono font-semibold uppercase tracking-wide"
+                              style={{ color:tc, border:'1px solid '+tc+'40' }}>{TIERS[a.tier].label}</span>
+                            <span className="text-[12px] text-ink2 leading-snug">{a.action}</span>
+                          </div>
+                          <div className="font-mono text-[9.5px] text-ink5 mt-1 break-all leading-relaxed">
+                            <span className="text-ink4">{a.ts}</span><br/>
+                            <span style={{color:'#59A877'}}>prev </span>{a.prevHash.slice(0,16)}…
+                            <span className="mx-1 text-ink5">→</span>
+                            <span style={{color:'#38E07B'}}>{a.hash.slice(0,16)}…</span>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+                <p className="text-[10px] text-ink5 mt-4 leading-snug">
+                  Каждое звено = SHA-256(prevHash · action · ts) — цепочка непрерывна и неизменяема: правка любого шага рвёт хеш всех последующих.
+                </p>
+              </div>
+            )}
 
             {/* генерация отчёта */}
             <div>

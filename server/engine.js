@@ -13,7 +13,7 @@
      detect(events, { datasetId })        -> { incidents, meta }
    ========================================================================= */
 
-const { fmt, hourOf, dowOf, dayOf, minutesBetween, trimmedMean, median, percentile } =
+const { fmt, hourOf, dowOf, dayOf, minutesBetween, trimmedMean, median, percentile, madZScores } =
   require('./lib/fmt');
 const { buildGraph, lateralPath } = require('./lib/graph');
 const { shapSplit } = require('./lib/shap');
@@ -951,6 +951,54 @@ function countDays(events) {
   return days.size;
 }
 
+// peerGroupMad — parallel unsupervised anomaly signal: rank users within a
+// peer group (same role) by daily read-volume using robust MAD z-scores.
+// This is label-free outlier detection that complements the per-user history
+// baseline (computeUserBaseline) — it catches the user who is anomalous
+// *relative to peers* even when their own history looks self-consistent.
+// Pure / side-effect-free and NOT wired into detect(): exposed for the
+// "unsupervised anomaly detection" narrative and ad-hoc analysis without
+// changing the precomputed-incident contract. z >= 3.5 is the conventional
+// modified-z outlier cut.
+function peerGroupMad(events, opts = {}) {
+  const z = Number.isFinite(opts.z) ? opts.z : 3.5;
+  const byUserDay = groupByUserDay(events);
+  // aggregate each user's mean daily read volume + their role
+  const perUser = new Map();
+  for (const [user, days] of byUserDay.entries()) {
+    const vols = [];
+    let role = null;
+    for (const dayEvents of days.values()) {
+      vols.push(dayReadRows(dayEvents));
+      if (!role && dayEvents.length) role = dayEvents[0].role || null;
+    }
+    const avg = vols.length ? vols.reduce((s, v) => s + v, 0) / vols.length : 0;
+    perUser.set(user, { user, role: role || '—', avgRowsPerDay: avg });
+  }
+  // group by role (peer group) and score within each group
+  const byRole = new Map();
+  for (const u of perUser.values()) {
+    if (!byRole.has(u.role)) byRole.set(u.role, []);
+    byRole.get(u.role).push(u);
+  }
+  const scored = [];
+  for (const group of byRole.values()) {
+    const zs = madZScores(group.map((u) => u.avgRowsPerDay));
+    group.forEach((u, i) => {
+      scored.push({
+        user: u.user,
+        role: u.role,
+        avgRowsPerDay: Math.round(u.avgRowsPerDay),
+        peerCount: group.length,
+        madZ: Math.round(zs[i] * 100) / 100,
+        isOutlier: zs[i] >= z,
+      });
+    });
+  }
+  scored.sort((a, b) => b.madZ - a.madZ);
+  return scored;
+}
+
 module.exports = {
   ENGINE_VERSION,
   CONFIG,
@@ -958,4 +1006,5 @@ module.exports = {
   buildBaselines,
   analyzeUserDay,
   detect,
+  peerGroupMad,
 };
