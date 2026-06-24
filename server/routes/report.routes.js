@@ -13,7 +13,18 @@ router.post('/report/:id', async (req, res) => {
   if (!inc) return res.status(404).json({ error: 'инцидент не найден', detail: req.params.id });
 
   const apiKey = req.body && req.body.apiKey ? String(req.body.apiKey).trim() : '';
-  if (apiKey) {
+  // Validate the client-supplied key shape before forwarding it to Anthropic.
+  // The key is NEVER stored server-side — it lives only for this request. An
+  // obviously-malformed value falls back to the offline mock report.
+  const validKey = apiKey && /^sk-ant-[A-Za-z0-9_-]{20,200}$/.test(apiKey);
+  if (apiKey && !validKey) {
+    return res.json({
+      id: inc.id,
+      mode: 'mock',
+      text: 'Неверный формат API-ключа Anthropic (ожидается sk-ant-...).\n\n--- Показан mock-черновик ---\n\n' + mockReport(inc),
+    });
+  }
+  if (validKey) {
     try {
       const text = await claudeReport(inc, apiKey);
       return res.json({ id: inc.id, mode: 'claude', model: 'claude-opus-4-8', text });

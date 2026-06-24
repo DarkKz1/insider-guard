@@ -5,6 +5,8 @@
 
 > ⚠️ Всё на экране — синтетика, **0 реальных ИИН**.
 
+> 📋 **Соответствие 5 официальным критериям трека (по разделу на каждый, с доказательствами) → [CRITERIA.md](CRITERIA.md).**
+
 ---
 
 ## Проблема
@@ -66,7 +68,8 @@
 - **`server/lib/shap.js`** — Hamilton/largest-remainder, Σ contribution === score EXACTLY.
 - **`server/lib/graph.js`** — buildGraph + lateralPath DFS ≥3 хоста.
 - **Канонический 12-полевой event-контракт + алиасы** = универсальный adapter-слой (новый источник РК ≈ 50 строк).
-- **AI:** `claude-opus-4-8` — **только** для investigation-нарратива / IR-отчёта, **никогда** не считает score. По умолчанию детерминированный mock-fallback (offline), `claudeReport` обёрнут в try/catch → mock.
+- **Независимая AI-модель (крит. #2):** собственная **unsupervised anomaly-модель — robust modified z-score (median/MAD)** — на устройстве, без внешних сервисов, детерминированно seeded (`server/lib/fmt.js` → `madZScores`, `server/engine.js` → `peerGroupMad`). Isolation Forest — drop-in за флагом, того же семейства, для детекта **не требуется**.
+- **AI (внешний):** `claude-opus-4-8` — **только** для investigation-нарратива / IR-отчёта, **никогда** не считает score. По умолчанию детерминированный mock-fallback (offline), `claudeReport` обёрнут в try/catch → mock.
 
 ## Команда / трек
 

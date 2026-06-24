@@ -18,8 +18,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- body parsing ---
-app.use(express.json({ limit: '64mb' }));
-app.use(express.urlencoded({ extended: true }));
+// Cap the JSON body to bound memory per request (DoS surface). 32 MB is ample
+// for the largest reasonable { events:[...] } ingest payload while rejecting an
+// abusive multi-hundred-MB body before it is buffered. urlencoded is small (only
+// a couple of form fields are ever sent) and limited explicitly.
+app.use(express.json({ limit: '32mb' }));
+app.use(express.urlencoded({ extended: false, limit: '256kb', parameterLimit: 100 }));
 
 // --- CORS (open for local dev front; single-origin in prod) ---
 app.use((req, res, next) => {

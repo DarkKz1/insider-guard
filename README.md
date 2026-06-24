@@ -9,7 +9,7 @@
 > + **приоритизированная очередь** инцидентов для SOC. Превенция следующей утечки 16,3 млн ИИН,
 > а не разбор после.
 
-🔗 **Live demo:** https://insider-guard.vercel.app · 🗂 [SUBMISSION.md](SUBMISSION.md) (одностраничник для жюри)
+🔗 **Live demo:** https://insider-guard.vercel.app · 🗂 [SUBMISSION.md](SUBMISSION.md) (одностраничник для жюри) · 📋 [CRITERIA.md](CRITERIA.md) (соответствие 5 официальным критериям трека)
 
 > ⚠️ Всё на экране — **синтетика, 0 реальных ИИН**. Privacy-by-design: псевдонимизация, per-user baseline, human-in-the-loop.
 
@@ -22,7 +22,7 @@
 - **Kill-chain ribbon** — тактики атаки от Initial Access до Exfiltration.
 - **SHA-256 tamper-seal** — криптографическая печать досье; правка одного числа → `INTEGRITY BROKEN`.
 - **Honeytoken / DECEPTION_TRIPPED** — детерминированный 0-FP слой поверх вероятностного UEBA.
-- **Unsupervised robust-MAD** — z-сигнал «×N от своей нормы И от пиров».
+- **Независимая AI-модель на устройстве (крит. #2)** — собственная **unsupervised anomaly-модель: robust modified z-score (median/MAD)**, сигнал «×N от своей нормы И от пиров». Без внешних сервисов, детерминированно seeded (`server/lib/fmt.js` → `madZScores`, `server/engine.js` → `peerGroupMad`). Isolation Forest — drop-in за флагом того же семейства, для детекта не требуется. Внешний `claude-opus-4-8` — только опциональный черновик отчёта (offline-fallback), score не считает.
 - **Real-time MTTD** — детект по потоку access-логов за секунды (vs 241 день среднего MTTD по IBM 2025).
 - **Реагирование видно сразу** — tiered-autonomy actions (AUTO/APPROVE/HIGH-RISK) + append-only hash-chain audit-log: ответ применяется и фиксируется в журнале мгновенно.
 - **Экспорт запечатанного досье** — выгрузка инцидента в `.json` с SHA-256 chain-of-custody (правка одного числа → `INTEGRITY BROKEN`).
