@@ -1560,20 +1560,62 @@ function buildUploadedCases(events) {
     const baseline = computeBaselineFromEvents(uEvents);
     const safeId = uid.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24);
     const userNodeId = 'UP-U-' + safeId;
-    // ресурсы и хосты этого пользователя
-    const hasExfil = uEvents.some(e => e.action === 'EXPORT' || e.action === 'DOWNLOAD');
     const EGRESS_ID = 'UP-EGRESS';
-    const resIds = [...new Set(uEvents.map(e => e.resource).filter(Boolean))];
-    const hostIds = [...new Set(uEvents.map(e => e.host).filter(Boolean))];
+    // === ВЫБОР INCIDENT-ОКНА ===
+    // В граф/скоринг идёт НЕ вся история, а только аномальное окно (пиковый день).
+    // Это убирает накладку подписей нескольких read-рёбер: остаётся чистый слепок
+    // «крупное чтение → ресурс + выгрузка → egress». baseline по-прежнему из полной истории.
+    const dayVol = {}; // день → суммарный объём чтения (SELECT/EXPORT/DOWNLOAD)
+    uEvents.forEach(e => {
+      if (!['SELECT','EXPORT','DOWNLOAD'].includes(e.action)) return;
+      const day = (e.ts || '').slice(0, 10) || 'unknown';
+      dayVol[day] = (dayVol[day] || 0) + (e.rows || 0);
+    });
+    const daysSorted = Object.keys(dayVol).sort((a,b)=> dayVol[b] - dayVol[a]);
+    const baseAvg = Math.max(1, baseline.avg_rows_per_day);
+    let incidentDays;
+    if (!daysSorted.length) {
+      // вообще нет читающих событий — берём последний день истории (репрезентативно, не пусто)
+      const allDays = [...new Set(uEvents.map(e => (e.ts||'').slice(0,10)).filter(Boolean))].sort();
+      incidentDays = allDays.length ? [allDays[allDays.length - 1]] : null;
+    } else {
+      const peakDay = daysSorted[0];
+      const peakVol = dayVol[peakDay];
+      // аномалия = пиковый день кратно (≥3×) превышает персональную норму.
+      if (peakVol >= 3 * baseAvg) {
+        // берём ВСЕ дни с аномальным объёмом (на случай многодневной эксфильтрации),
+        // но обычно это один пиковый день → чистый граф.
+        incidentDays = daysSorted.filter(d => dayVol[d] >= 3 * baseAvg);
+      } else {
+        // benign / нет выраженной аномалии (dana.support, svc_etl_nightly):
+        // репрезентативная выборка — последний день, чтобы граф был чистым и не пустым.
+        const allDays = [...new Set(uEvents.map(e => (e.ts||'').slice(0,10)).filter(Boolean))].sort();
+        incidentDays = allDays.length ? [allDays[allDays.length - 1]] : [peakDay];
+      }
+    }
+    const incidentSet = incidentDays ? new Set(incidentDays) : null;
+    // окно инцидента: события выбранных дней (или вся история, если день не определился —
+    // деградация безопасна, граф всё равно нарисуется)
+    const windowEvents = incidentSet
+      ? uEvents.filter(e => incidentSet.has((e.ts||'').slice(0,10)))
+      : uEvents.slice();
+    const incidentEvents = windowEvents.length ? windowEvents : uEvents.slice();
+
+    // ресурсы/хосты/egress графа — СТРОГО из окна инцидента, чтобы узлы совпадали с
+    // нарисованными рёбрами (нет «висячих» узлов без рёбер). resource для скоринга не трогаем.
+    const hasExfil = incidentEvents.some(e => e.action === 'EXPORT' || e.action === 'DOWNLOAD');
+    const resIds = [...new Set(incidentEvents.map(e => e.resource).filter(Boolean))];
+    const hostIds = [...new Set(incidentEvents.map(e => e.host).filter(Boolean))];
     const resources = resIds.map(rid =>
       rsc(rid, rid, 'uploaded', 'high', []));
     // выгрузка идёт на отдельный egress-узел графа (данные покидают периметр) — чтение и
-    // выгрузка больше не накладывают подписи на один узел. resource для скоринга НЕ меняем.
+    // выгрузка больше не накладывают подписи на один узел.
     if (hasExfil) resources.push(rsc(EGRESS_ID, 'Внешний канал (egress)', 'uploaded', 'critical', []));
     const hosts = hostIds.map(hid => hst(hid, hid, 'office'));
+
     // события в форме движка: чтение → user→ресурс; выгрузка → user→egress (визуальное
     // разнесение рёбер). Поле resource оставляем исходным, чтобы analyze()/score не менялся.
-    const evs = uEvents
+    const evs = incidentEvents
       .slice()
       .sort((a,b)=> (a.ts||'').localeCompare(b.ts||''))
       .map((e, i) => {
@@ -1586,7 +1628,8 @@ function buildUploadedCases(events) {
           rows: e.rows, ts: e.ts, channel: exfil ? 'cloud' : 'db',
         };
       });
-    const totalRead = uEvents
+    // totalRead теперь = объём чтения В ОКНЕ инцидента (то, что реально скорится)
+    const totalRead = incidentEvents
       .filter(e => ['SELECT','EXPORT','DOWNLOAD'].includes(e.action))
       .reduce((s,e)=> s + (e.rows||0), 0);
     return {

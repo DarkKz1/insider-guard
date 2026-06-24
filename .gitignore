@@ -10,3 +10,4 @@ data/.store.*.tmp
 .vercel/
 .playwright-mcp/
 *.bak
+*.png
