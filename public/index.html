@@ -1399,11 +1399,258 @@ function MitreBadge({ cs, size='md' }) {
   );
 }
 
+/* =====================================================================
+   ЗАГРУЗКА СВОЕГО ЛОГА (CSV) — отдельный, полностью клиентский путь.
+   Закрывает возражение жюри «работает только на синтетике?»: судья даёт
+   свой access-лог → парсим → считаем baseline ИЗ ЭТИХ данных (leave-one-
+   day-out) → собираем кейс в ТОЙ ЖЕ форме, что встроенные CASES → гоним
+   СУЩЕСТВУЮЩИЙ analyze(). Никакой новой scoring-логики, только маппинг +
+   переиспользование. CASES / analyze() / shap НЕ затронуты.
+   ===================================================================== */
+
+// Встроенный реалистичный сэмпл: инсайдер-эксфильтрация (норма ~50 строк/день,
+// затем ночная выгрузка десятков тысяч) + два benign-пользователя (дневной
+// аналитик в норме и ночной ETL-сервис со стабильно крупным объёмом).
+const CSV_SAMPLE = `user,role,resource,action,rows,ts,host,ip
+sabit.a,analyst,DB-PERSONS,SELECT,48,2026-06-08 10:12,WS-12,10.20.4.12
+sabit.a,analyst,DB-PERSONS,SELECT,52,2026-06-09 11:40,WS-12,10.20.4.12
+sabit.a,analyst,DB-PERSONS,SELECT,45,2026-06-10 09:55,WS-12,10.20.4.12
+sabit.a,analyst,DB-PERSONS,SELECT,57,2026-06-11 14:20,WS-12,10.20.4.12
+sabit.a,analyst,DB-PERSONS,SELECT,41000,2026-06-12 02:14,WS-12,10.20.4.12
+sabit.a,analyst,DB-PERSONS,EXPORT,40000,2026-06-12 02:31,WS-12,10.20.4.12
+dana.k,analyst,DB-TAX,SELECT,310,2026-06-08 10:05,WS-21,10.20.5.21
+dana.k,analyst,DB-TAX,SELECT,295,2026-06-09 11:10,WS-21,10.20.5.21
+dana.k,analyst,DB-TAX,SELECT,330,2026-06-10 15:42,WS-21,10.20.5.21
+dana.k,analyst,DB-TAX,SELECT,288,2026-06-11 13:30,WS-21,10.20.5.21
+svc_etl,service,DB-PERSONS,SELECT,84000,2026-06-08 03:00,BACKUP-1,10.40.0.1
+svc_etl,service,DB-PERSONS,SELECT,86000,2026-06-09 03:00,BACKUP-1,10.40.0.1
+svc_etl,service,DB-PERSONS,SELECT,85000,2026-06-10 03:00,BACKUP-1,10.40.0.1
+svc_etl,service,DB-PERSONS,SELECT,90000,2026-06-11 03:00,BACKUP-1,10.40.0.1`;
+
+// Алиасы заголовков (рус/англ, толерантно к регистру/пробелам).
+const CSV_ALIASES = {
+  user:     ['user','пользователь','username','account','аккаунт','subject','login'],
+  role:     ['role','роль'],
+  resource: ['resource','ресурс','table','таблица','object','db_object','target'],
+  action:   ['action','действие','operation','операция','event','cmd'],
+  rows:     ['rows','строк','строки','count','records','записей','volume','объем','объём'],
+  ts:       ['ts','time','время','timestamp','datetime','date','дата'],
+  host:     ['host','хост','station','арм','machine','workstation','source_host'],
+  ip:       ['ip','адрес','src_ip','ip_address'],
+};
+
+// Разбор одной CSV-строки с учётом кавычек и запятых внутри полей.
+function splitCsvLine(line) {
+  const out = []; let cur = '', q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') q = false;
+      else cur += ch;
+    } else {
+      if (ch === '"') q = true;
+      else if (ch === ',' || ch === ';' || ch === '\t') { out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map(s => s.trim());
+}
+
+// Нормализация ts к формату "YYYY-MM-DD HH:MM" (его ждут hourOf/dowOf — slice по позициям).
+function normalizeTs(raw) {
+  let s = (raw || '').trim().replace('T', ' ').replace(/\//g, '-');
+  // "2026-06-12 02:14:33" → срезаем секунды; "2026-06-12 2:14" → доводим час до 2 знаков
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ ]+(\d{1,2}):(\d{2})/);
+  if (m) {
+    const [, y, mo, d, h, mi] = m;
+    return `${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')} ${h.padStart(2,'0')}:${mi}`;
+  }
+  // только дата → добавим полдень (нейтральный час)
+  const md = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (md) { const [, y, mo, d] = md; return `${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')} 12:00`; }
+  return s.slice(0, 16); // best-effort
+}
+
+// Парсинг CSV → массив нормализованных событий. Бросает понятную ошибку при невалидном входе.
+function parseAccessCsv(text) {
+  const raw = (text || '').replace(/\r/g, '');
+  const lines = raw.split('\n').map(l => l).filter(l => l.trim().length);
+  if (lines.length < 2) {
+    throw new Error('CSV должен содержать строку-заголовок и хотя бы одну строку данных.');
+  }
+  const header = splitCsvLine(lines[0]).map(h => h.toLowerCase().replace(/^"|"$/g, '').trim());
+  // сопоставляем колонки по алиасам
+  const colIdx = {};
+  Object.entries(CSV_ALIASES).forEach(([key, aliases]) => {
+    const i = header.findIndex(h => aliases.includes(h));
+    if (i >= 0) colIdx[key] = i;
+  });
+  if (colIdx.user === undefined) {
+    throw new Error('Не найдена колонка пользователя (user / пользователь). Заголовок: ' + header.join(', '));
+  }
+  if (colIdx.resource === undefined && colIdx.action === undefined && colIdx.rows === undefined) {
+    throw new Error('Нужна хотя бы одна из колонок: resource / action / rows.');
+  }
+  const events = [];
+  for (let li = 1; li < lines.length; li++) {
+    const cells = splitCsvLine(lines[li]);
+    const get = (k) => (colIdx[k] !== undefined ? (cells[colIdx[k]] || '').trim() : '');
+    const user = get('user');
+    if (!user) continue; // пропускаем пустые строки
+    const action = (get('action') || 'SELECT').toUpperCase().replace(/[^A-Z_]/g, '') || 'SELECT';
+    const rowsRaw = get('rows').replace(/[^\d.-]/g, '');
+    const rows = rowsRaw ? Math.max(0, Math.round(parseFloat(rowsRaw)) || 0) : 0;
+    events.push({
+      user,
+      role: get('role') || 'user',
+      resource: get('resource') || 'DB-UNKNOWN',
+      action,
+      rows,
+      ts: normalizeTs(get('ts')),
+      host: get('host') || ('HOST-' + user),
+      ip: get('ip') || '0.0.0.0',
+    });
+  }
+  if (!events.length) throw new Error('Не удалось разобрать ни одной строки данных.');
+  return events;
+}
+
+// baseline ИЗ истории пользователя методом leave-one-day-out:
+// группируем чтение по дню → суммарный объём/день → среднее БЕЗ аномального
+// (максимального) дня, чтобы выбросовый день не раздувал свою же норму.
+function computeBaselineFromEvents(userEvents) {
+  const byDay = {};
+  userEvents.forEach(e => {
+    if (!['SELECT','EXPORT','DOWNLOAD'].includes(e.action)) return;
+    const day = (e.ts || '').slice(0, 10) || 'unknown';
+    byDay[day] = (byDay[day] || 0) + (e.rows || 0);
+  });
+  let daily = Object.values(byDay);
+  if (!daily.length) daily = [0];
+  let baseDaily = daily;
+  if (daily.length >= 2) {
+    const sorted = [...daily].sort((a,b)=> a-b);
+    baseDaily = sorted.slice(0, sorted.length - 1); // leave-one-day-out: исключаем аномальный (макс) день
+  }
+  const avg = baseDaily.reduce((s,v)=> s+v, 0) / Math.max(1, baseDaily.length);
+  // work_hours: окно [min..max] часов читающих операций (исключая аномальный объём — берём типичные дни)
+  const hours = userEvents.map(e => hourOf(e.ts)).filter(h => !isNaN(h));
+  let wStart = 9, wEnd = 18;
+  if (hours.length) {
+    wStart = Math.min(...hours);
+    wEnd = Math.max(...hours) + 1;
+    if (wEnd - wStart < 1) wEnd = wStart + 1;
+  }
+  const knownTables = [...new Set(userEvents.map(e => e.resource).filter(Boolean))];
+  return { avg_rows_per_day: Math.max(1, Math.round(avg)), work_hours: [wStart, wEnd], known_tables: knownTables };
+}
+
+// Маппинг распарсенного CSV → массив кейсов в форме CASES (по одному на пользователя).
+// typology:'uploaded' — НЕ из встроенного множества типологий, поэтому MITRE-бейдж и
+// RESPONSE-плейбук просто отсутствуют (graceful). Каждый кейс прогоняется СУЩЕСТВУЮЩИМ analyze().
+function buildUploadedCases(events) {
+  const byUser = {};
+  events.forEach(e => { (byUser[e.user] = byUser[e.user] || []).push(e); });
+  const users = Object.keys(byUser);
+  const cases = users.map((uid, ui) => {
+    const uEvents = byUser[uid];
+    const role = uEvents[0].role || 'user';
+    const baseline = computeBaselineFromEvents(uEvents);
+    const safeId = uid.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 24);
+    const userNodeId = 'UP-U-' + safeId;
+    // ресурсы и хосты этого пользователя
+    const hasExfil = uEvents.some(e => e.action === 'EXPORT' || e.action === 'DOWNLOAD');
+    const EGRESS_ID = 'UP-EGRESS';
+    const resIds = [...new Set(uEvents.map(e => e.resource).filter(Boolean))];
+    const hostIds = [...new Set(uEvents.map(e => e.host).filter(Boolean))];
+    const resources = resIds.map(rid =>
+      rsc(rid, rid, 'uploaded', 'high', []));
+    // выгрузка идёт на отдельный egress-узел графа (данные покидают периметр) — чтение и
+    // выгрузка больше не накладывают подписи на один узел. resource для скоринга НЕ меняем.
+    if (hasExfil) resources.push(rsc(EGRESS_ID, 'Внешний канал (egress)', 'uploaded', 'critical', []));
+    const hosts = hostIds.map(hid => hst(hid, hid, 'office'));
+    // события в форме движка: чтение → user→ресурс; выгрузка → user→egress (визуальное
+    // разнесение рёбер). Поле resource оставляем исходным, чтобы analyze()/score не менялся.
+    const evs = uEvents
+      .slice()
+      .sort((a,b)=> (a.ts||'').localeCompare(b.ts||''))
+      .map((e, i) => {
+        const exfil = e.action === 'EXPORT' || e.action === 'DOWNLOAD';
+        return {
+          id: 'UP-E-' + ui + '-' + i,
+          from: userNodeId, to: exfil ? EGRESS_ID : e.resource,
+          user: userNodeId, role, resource: e.resource, db: 'uploaded',
+          host: e.host, ip: e.ip, geo: 'Астана', action: e.action,
+          rows: e.rows, ts: e.ts, channel: exfil ? 'cloud' : 'db',
+        };
+      });
+    const totalRead = uEvents
+      .filter(e => ['SELECT','EXPORT','DOWNLOAD'].includes(e.action))
+      .reduce((s,e)=> s + (e.rows||0), 0);
+    return {
+      id: 'UP-' + safeId,
+      typology: 'uploaded',
+      title: `Загруженный лог · ${uid} (baseline ${fmt(baseline.avg_rows_per_day)}/день, ${uEvents.length} событий)`,
+      channel: 'Загруженный access-лог (CSV) · baseline посчитан из этих данных',
+      facts: `Пользователь ${uid} (роль: ${role}). Baseline ${fmt(baseline.avg_rows_per_day)} строк/день посчитан из его собственной истории методом leave-one-day-out (аномальный день исключён из нормы). Суммарный объём чтения за окно: ${fmt(totalRead)} строк по ${resIds.length} ресурс(ам). work_hours ${baseline.work_hours[0]}:00–${baseline.work_hours[1]}:00, known_tables: ${baseline.known_tables.join(', ')||'—'}.`,
+      source: 'Реальные данные судьи: движок UEBA посчитал персональную норму прямо из загруженного лога (leave-one-day-out), затем прогнал тот же analyze(), что и на встроенных кейсах. Полностью офлайн, без сети.',
+      hub: userNodeId,
+      uploaded: true,
+      users: [ usr(userNodeId, uid + ' (из лога)', role, baseline, []) ],
+      resources,
+      hosts,
+      events: evs,
+    };
+  });
+  return cases;
+}
+
 function App() {
-  const analyzed = useMemo(()=> CASES.map(c => ({ cs:c, res:analyze(c) })), []);
+  const baseAnalyzed = useMemo(()=> CASES.map(c => ({ cs:c, res:analyze(c) })), []);
+
+  // === ОТДЕЛЬНЫЙ ПУТЬ: загруженные судьёй кейсы (CSV) — аддитивно поверх встроенных ===
+  const [uploadedCases, setUploadedCases] = useState([]); // массив cs в форме CASES
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [csvText, setCsvText] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const uploadedAnalyzed = useMemo(()=> {
+    // analyze() обёрнут в try/catch на КАЖДЫЙ кейс: битый кейс не валит остальные и ядро демо.
+    return uploadedCases.map(c => {
+      try { return { cs:c, res:analyze(c) }; } catch (e) { return null; }
+    }).filter(Boolean);
+  }, [uploadedCases]);
+
+  // Встроенное демо (baseAnalyzed) НИКОГДА не теряется — загруженные кейсы просто добавляются.
+  const analyzed = useMemo(()=> [...baseAnalyzed, ...uploadedAnalyzed], [baseAnalyzed, uploadedAnalyzed]);
   // сортировка очереди по убыванию score (приоритизация)
   const queue = useMemo(()=> [...analyzed].sort((a,b)=> b.res.score - a.res.score), [analyzed]);
-  const [selId, setSelId] = useState(queue[0].cs.id);
+  const [selId, setSelId] = useState(baseAnalyzed[0].cs.id);
+
+  const runCsv = (text) => {
+    setUploadError('');
+    try {
+      const events = parseAccessCsv(text);
+      const cases = buildUploadedCases(events);
+      if (!cases.length) throw new Error('Из лога не удалось собрать ни одного пользователя.');
+      setUploadedCases(cases);
+      // открыть самый рискованный загруженный инцидент сразу
+      const ranked = cases.map(c => ({ cs:c, res:analyze(c) })).sort((a,b)=> b.res.score - a.res.score);
+      setSelId(ranked[0].cs.id);
+      setMode('incident');
+      setUploadOpen(false);
+    } catch (e) {
+      setUploadError(e.message || 'Не удалось разобрать CSV.');
+    }
+  };
+  const onCsvFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { setCsvText(String(reader.result || '')); runCsv(String(reader.result || '')); };
+    reader.onerror = () => setUploadError('Не удалось прочитать файл.');
+    reader.readAsText(file);
+  };
   const sel = analyzed.find(a => a.cs.id === selId);
   const [alertThreshold, setAlertThreshold] = useState(55); // what-if: порог тревоги (жюри двигает сам)
 
@@ -1424,11 +1671,13 @@ function App() {
   // метрики корпуса для жюри: confusion-matrix на ground-truth + recall@top-N + снижение тревог.
   // Всё пересчитывается под порог тревоги alertThreshold (what-if — жюри двигает ползунок).
   const corpusMetrics = useMemo(()=> {
-    const total = analyzed.length;
-    const illicit = analyzed.filter(a => isIllicit(a.cs)).length;
+    // ВАЖНО: метрики Валидации считаются ТОЛЬКО по встроенному корпусу (baseAnalyzed),
+    // загруженные CSV-кейсы не имеют ground-truth и НЕ должны двигать доказательство точности.
+    const total = baseAnalyzed.length;
+    const illicit = baseAnalyzed.filter(a => isIllicit(a.cs)).length;
     const benign = total - illicit;
     let TP=0, FP=0, FN=0, TN=0;
-    analyzed.forEach(a => {
+    baseAnalyzed.forEach(a => {
       const flagged = a.res.score >= alertThreshold;
       const bad = isIllicit(a.cs);
       if (flagged && bad) TP++; else if (flagged && !bad) FP++;
@@ -1439,7 +1688,7 @@ function App() {
     const f1 = (precision+recall) ? 2*precision*recall/(precision+recall) : 0;
     const accuracy = total ? (TP+TN)/total : 0;
     const alertsShown = TP+FP;
-    const ranked = [...analyzed].sort((a,b)=> b.res.score - a.res.score);
+    const ranked = [...baseAnalyzed].sort((a,b)=> b.res.score - a.res.score);
     const hitsTopN = ranked.slice(0, illicit).filter(a => isIllicit(a.cs)).length;
     const recallTopN = illicit ? Math.round((hitsTopN/illicit)*100) : 100;
 
@@ -1472,7 +1721,7 @@ function App() {
     const naiveFlags = a =>
       a.cs.events.length >= NAIVE_EVENTS || a.cs.events.some(t => t.rows >= NAIVE_VOLUME);
     let naiveTP = 0, naiveFP = 0, naiveFN = 0;
-    analyzed.forEach(a => {
+    baseAnalyzed.forEach(a => {
       const flagged = naiveFlags(a), bad = isIllicit(a.cs);
       if (flagged && bad) naiveTP++;
       else if (flagged && !bad) naiveFP++;
@@ -1492,7 +1741,7 @@ function App() {
     return { total, illicit, benign, TP, FP, FN, TN, precision, recall, f1, accuracy, alertsShown,
       recallTopN, naiveAlerts, naiveTP, naiveFP, naiveFN, reduction, auprc,
       prevalence, auprcLift, dummyAccuracy };
-  }, [analyzed, alertThreshold]);
+  }, [baseAnalyzed, alertThreshold]);
 
   const genSAR = async () => {
     if (apiKey.trim()) {
@@ -1512,7 +1761,10 @@ function App() {
 
   // hero-статус: сколько реальных угроз / критических в очереди (одна спокойная строка в шапке)
   const heroStat = useMemo(()=> {
-    const threats = queue.filter(({cs}) => isIllicit(cs)).length;
+    // встроенные кейсы — по ground-truth (isIllicit); загруженные (typology 'uploaded') не имеют
+    // ground-truth, поэтому считаем угрозой только реально флагнутые (score ≥ порога тревоги),
+    // иначе чистый загруженный пользователь (score 0) ошибочно попадал бы в счётчик «угроз».
+    const threats = queue.filter(({cs,res}) => cs.typology==='uploaded' ? res.score >= 55 : isIllicit(cs)).length;
     const critical = queue.filter(({res}) => res.priority.color === 'crit').length;
     return { threats, critical };
   }, [queue]);
@@ -1597,10 +1849,57 @@ function App() {
               </div>
             </div>
 
+            {/* ===== ЗАГРУЗИТЬ СВОЙ ЛОГ (CSV) — отдельный клиентский путь ===== */}
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
+              <span className="t-eyebrow text-[11px] text-ink3">Свои данные · проверка не на синтетике</span>
+              <button onClick={()=> setUploadOpen(o => !o)} className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10.5px]">
+                ↓ Загрузить свой лог (CSV)
+              </button>
+            </div>
+            {uploadOpen && (
+              <div className="relative console-frame corner-4 stat-tint rounded-xl px-6 py-6 mb-8 overflow-hidden fade-in">
+                <span className="ctick tr"></span><span className="ctick bl"></span>
+                <p className="t-eyebrow text-[10px] text-accent mb-1.5">Offline · данные не покидают браузер</p>
+                <h3 className="t-head text-[16px] text-ink1 mb-2">Дайте движку свой access-лог</h3>
+                <p className="text-[12px] text-ink3 leading-relaxed mb-4 max-w-[640px]">
+                  Движок посчитает baseline ИЗ ваших данных (leave-one-day-out, аномальный день не раздувает свою норму) и прогонит тот же UEBA-скоринг, что и на встроенных кейсах.
+                  Колонки (алиасы рус/англ): <span className="font-mono text-ink2">user, role, resource, action, rows, ts, host, ip</span>.
+                </p>
+                <textarea value={csvText} onChange={e=> setCsvText(e.target.value)}
+                  placeholder={"user,role,resource,action,rows,ts,host,ip\nsabit.a,analyst,DB-PERSONS,SELECT,48,2026-06-08 10:12,WS-12,10.20.4.12"}
+                  spellCheck={false}
+                  className="w-full h-36 bg-ink/60 border border-edge rounded-lg px-3.5 py-3 text-[11.5px] font-mono text-ink2 outline-none focus:border-accent/60 resize-y leading-relaxed" />
+                {uploadError && (
+                  <div className="mt-3 rounded-lg px-3.5 py-3 text-[11.5px] leading-relaxed border"
+                    style={{borderColor:'rgba(255,97,97,0.4)', background:'rgba(255,97,97,0.07)', color:'#FFB4B4'}}>
+                    <span className="font-bold" style={{color:SEV.crit}}>Не удалось разобрать CSV. </span>{uploadError}
+                    <span className="block mt-1 text-ink4">Ожидается заголовок + строки. Минимум — колонка user и одна из resource/action/rows.</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-3 mt-4 flex-wrap">
+                  <button onClick={()=> runCsv(csvText)} className="btn-green rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">Проанализировать ›</button>
+                  <button onClick={()=> { setCsvText(CSV_SAMPLE); setUploadError(''); }} className="btn-ghost rounded-lg px-4 py-2.5 t-eyebrow text-[10.5px]">Пример</button>
+                  <label className="btn-ghost rounded-lg px-4 py-2.5 t-eyebrow text-[10.5px] cursor-pointer">
+                    Выбрать .csv-файл
+                    <input type="file" accept=".csv,text/csv,text/plain" className="hidden"
+                      onChange={e=> onCsvFile(e.target.files && e.target.files[0])} />
+                  </label>
+                  {uploadedCases.length > 0 && (
+                    <button onClick={()=> { setUploadedCases([]); setUploadError(''); }} className="t-mono text-[10.5px] text-ink5 hover:text-ink3 transition ml-1">
+                      очистить загруженное
+                    </button>
+                  )}
+                </div>
+                {uploadedCases.length > 0 && (
+                  <p className="text-[11px] text-accent mt-3 font-mono">✓ загружено пользователей: {uploadedCases.length} — добавлены в очередь ниже</p>
+                )}
+              </div>
+            )}
+
             {/* заголовок очереди */}
             <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
               <span className="t-eyebrow text-[11px] text-ink3">Очередь триажа · по risk-score</span>
-              <span className="t-mono text-[10.5px] text-ink5">{queue.length} инцидентов</span>
+              <span className="t-mono text-[10.5px] text-ink5">{queue.length} инцидентов{uploadedCases.length ? ` · ${uploadedCases.length} из лога` : ''}</span>
             </div>
 
             {queue.map(({cs,res}, qi) => {
