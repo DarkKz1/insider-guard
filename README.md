@@ -22,7 +22,7 @@
 - **Kill-chain ribbon** — тактики атаки от Initial Access до Exfiltration.
 - **SHA-256 tamper-seal** — криптографическая печать досье; правка одного числа → `INTEGRITY BROKEN`.
 - **Honeytoken / DECEPTION_TRIPPED** — детерминированный 0-FP слой поверх вероятностного UEBA.
-- **Две независимые AI-модели на устройстве (крит. #2)** — (1) **robust modified z-score (median/MAD)**, сигнал «×N от своей нормы И от пиров» (`server/lib/fmt.js` → `madZScores`, `server/engine.js` → `peerGroupMad`); (2) **полноценный Isolation Forest** (Liu/Ting/Zhou, ICDM 2008) — реализован с нуля на чистом JS, **0 ML-зависимостей**, **обучен на ~980 синтетических фоновых user-day из ролевых распределений `ROLE_NORMS`** (140 на роль × 7 ролей; novelty detection — инциденты НЕ обучают лес, а скорятся против обученной нормы), **виден в UI** (чип `iForest` + развёрнутый MODEL CARD), seeded-детерминизм (mulberry32, seed 1337, ψ=256, T=100; `index.html` → `buildIForest`). Обе — без внешних сервисов, на устройстве. Поверх вероятностной AI — детерминированный **0-FP honeytoken-слой** (defense-in-depth): на honeytoken-кейсе (доступ к decoy off-hours) IF даёт **score ≈ 0.79 > τ=0.72** — тоже флагает приманку, обе линии согласованы; детерминированный слой — это **гарантия 0-FP по построению**, ловит касание decoy даже если бы оно выглядело поведенчески нормально. Внешний `claude-opus-4-8` — только опциональный черновик отчёта (offline-fallback), score не считает.
+- **Две независимые AI-модели на устройстве (крит. #2)** — (1) **robust modified z-score (median/MAD)**, сигнал «×N от своей нормы И от пиров» (`server/lib/fmt.js` → `madZScores`, `server/engine.js` → `peerGroupMad`); (2) **полноценный Isolation Forest** (Liu/Ting/Zhou, ICDM 2008) — реализован с нуля на чистом JS, **0 ML-зависимостей**, **обучен на ~980 синтетических фоновых user-day из ролевых распределений `ROLE_NORMS`** (140 на роль × 7 ролей; novelty detection — инциденты НЕ обучают лес, а скорятся против обученной нормы), **виден в UI** (чип `iForest` + развёрнутый MODEL CARD), seeded-детерминизм (mulberry32, seed 1337, ψ=256, T=100; `index.html` → `buildIForest`). Обе — без внешних сервисов, на устройстве. Поверх вероятностной AI — детерминированный **0-FP honeytoken-слой** (defense-in-depth): на honeytoken-кейсе (доступ к decoy off-hours) IF даёт **score ≈ 0.79 > τ=0.72** — тоже флагает приманку, обе линии согласованы; детерминированный слой — это **гарантия 0-FP по построению**, ловит касание decoy даже если бы оно выглядело поведенчески нормально. IR-нарратив генерит **локальная модель** (Ollama, `qwen2.5:7b`) on-prem — без внешних сервисов и без API-ключа; детерминированный mock-шаблон — offline-fallback. **Ноль внешних API во всём продукте.** LLM пишет только текст отчёта, score не считает.
 - **Real-time MTTD** — детект по потоку access-логов за секунды (vs 241 день среднего MTTD по IBM 2025).
 - **Реагирование видно сразу** — tiered-autonomy actions (AUTO/APPROVE/HIGH-RISK) + append-only hash-chain audit-log: ответ применяется и фиксируется в журнале мгновенно.
 - **Экспорт запечатанного досье** — выгрузка инцидента в `.json` с SHA-256 chain-of-custody (правка одного числа → `INTEGRITY BROKEN`).
@@ -165,7 +165,8 @@ curl -X POST http://localhost:3000/api/ingest -H "content-type: application/json
 | POST | `/api/dataset/:id/activate` | переключить активный датасет |
 | GET | `/api/incidents?...` | очередь триажа (score desc) |
 | GET | `/api/incidents/:id` | полная деталь (граф + SHAP + baseline + playbook) |
-| POST | `/api/report/:id` | IR-отчёт (mock, или Claude если передан `{apiKey}`) |
+| POST | `/api/report/:id` | IR-отчёт (локальная модель Ollama `qwen2.5:7b`, без ключа; offline-fallback на mock) |
+| POST | `/api/report/draft` | черновик произвольного текста отчёта через локальный Ollama (используется in-browser демо) |
 | GET | `/api/metrics?threshold=` | confusion / precision / recall / AUPRC + naive-DLP |
 
 ### Движок (для аудируемости)
@@ -185,12 +186,26 @@ curl -X POST http://localhost:3000/api/ingest -H "content-type: application/json
 
 Точный конфиг (веса, VOLUME_MULT, окно baseline, пороги) снапшотится в `run_meta` на датасет.
 
-### Где Claude / AI
+### Где LLM / AI
 
-`claude-opus-4-8` используется **только** для investigation-нарратива / IR-отчёта — **никогда не
-считает score/вердикт** (anti-pattern «LLM as source of truth» исключён архитектурно). По умолчанию
-черновик генерится **детерминированным mock-шаблоном** (`report.js mockReport`, работает оффлайн);
-`claudeReport` обёрнут в try/catch → mock-fallback, поэтому демо не зависит от сети/ключа.
+IR-нарратив / investigation-отчёт генерит **локальная модель** — **Ollama, `qwen2.5:7b`** (7B,
+мультиязычная, вкл. русский), запущенная on-prem на `127.0.0.1:11434` (эндпоинт и модель
+переопределяются через `OLLAMA_URL` / `OLLAMA_MODEL`). **Ни ключа, ни внешнего/облачного API-вызова
+нигде в продукте нет**: браузер никогда не обращается к модели напрямую — Node-сервер проксирует
+запрос к локальному демону Ollama (маршруты `POST /api/report/:id` и `POST /api/report/draft`).
+LLM **никогда не считает score/вердикт** (anti-pattern «LLM as source of truth» исключён
+архитектурно) — пишет только текст отчёта. Если локальный Ollama недоступен (например, на
+эфемерном Vercel-демо, где его нет), черновик генерится **детерминированным mock-шаблоном**
+(`report.js mockReport`, работает оффлайн) — демо никогда не падает. **Ноль внешних API во всём
+продукте:** все модели (детект-модели + отчётный LLM) локальны.
+
+**Чтобы получить реальный локальный нарратив локально:**
+```bash
+ollama pull qwen2.5:7b   # один раз — скачать модель
+ollama serve             # поднять локальный демон (или он уже запущен)
+npm start                # сервер проксирует /api/report/* к 127.0.0.1:11434
+```
+Если Ollama не установлен/не запущен — отчёт автоматически откатывается на детерминированный mock.
 
 ### Persistence
 
@@ -228,6 +243,8 @@ curl -X POST http://localhost:3000/api/ingest -H "content-type: application/json
 - **Heroku-style:** `Procfile` (`web: npm start`). FS эфемерный → без диска стор in-memory (re-seed на boot).
 - **Vercel (поддерживается, эфемерно):** `api/index.js` экспортит Express-app напрямую; `vercel.json`
   рерайтит `/api/*`. Serverless FS не writable → стор in-memory, seed детерминированно на первом запросе.
+  На Vercel нет локального Ollama → IR-отчёт там отдаёт **детерминированный mock-шаблон** (offline-
+  fallback); реальный локальный нарратив доступен при запуске с поднятым Ollama (см. «Где LLM / AI»).
 
 **Если CLI/auth недоступны**, локальный запуск выше полностью функционален с реальным движком +
 seeded-корпусом — это гарантированный deliverable.
@@ -288,7 +305,8 @@ seeded-корпусом — это гарантированный deliverable.
 - Веса экспертно-калиброваны (не обучены) и снапшотятся в `run_meta` для воспроизводимости.
 - Данные синтетические, подобраны так, чтобы каждая типология чисто срабатывала; benign-контроли
   добавлены специально против «детектора-перестраховщика».
-- LLM-нарратив по умолчанию — mock; реальный Claude (`claude-opus-4-8`) — опционально по ключу.
+- LLM-нарратив генерит **локальная модель** (Ollama, `qwen2.5:7b`) on-prem — без ключа и без внешних
+  сервисов; при недоступном Ollama — детерминированный mock-шаблон (offline-fallback). Ноль внешних API.
 
 > Историческая эволюция прототипа (AML → prescrubber → insider, один движок) сохранена в
 > [`archive/`](archive/) как пруф pivot velocity.

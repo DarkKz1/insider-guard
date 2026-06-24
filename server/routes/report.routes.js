@@ -1,41 +1,62 @@
 'use strict';
 const express = require('express');
 const { resolveDataset, incidentDetail } = require('../queries');
-const { mockReport, claudeReport } = require('../report');
+const { mockReport, ollamaReport, SOC_SYSTEM } = require('../report');
+const { ollamaChat, ollamaUp, OLLAMA_MODEL } = require('../lib/llm');
 
 const router = express.Router();
 
-// POST /api/report/:id  { apiKey? } -> { id, mode, model?, text }
+// Cap the client-supplied report context (abuse / DoS guard on the local proxy).
+const MAX_PROMPT = 16000;
+
+// POST /api/report/draft  { prompt } -> { mode, model?, text? }
+// Thin on-prem proxy for the in-browser demo (which builds the incident context
+// client-side). The browser NEVER talks to the model directly and holds no key —
+// this forwards the incident-context message to the LOCAL Ollama daemon. The
+// system prompt is fixed server-side (the client cannot inject the system role),
+// and the prompt length is capped. On an unreachable daemon it returns
+// mode:'unavailable' and the client falls back to its own deterministic mock.
+//
+// NOTE: declared BEFORE '/report/:id' so the literal 'draft' is not captured as
+// an incident id by the parameterized route.
+router.post('/report/draft', async (req, res) => {
+  const prompt = req.body && typeof req.body.prompt === 'string' ? req.body.prompt.slice(0, MAX_PROMPT) : '';
+  if (!prompt.trim()) return res.status(400).json({ error: 'пустой prompt' });
+  // Fast-fail guard (serverless / no-Ollama): a quick 1.5s liveness probe so an
+  // unreachable daemon returns in <3s instead of hanging until the full chat
+  // timeout (and tripping the 30s Vercel function ceiling).
+  if (!(await ollamaUp())) {
+    return res.json({ mode: 'unavailable', detail: 'ollama недоступна (probe)' });
+  }
+  try {
+    const text = await ollamaChat({ system: SOC_SYSTEM, user: prompt });
+    return res.json({ mode: 'ollama', model: OLLAMA_MODEL, text });
+  } catch (e) {
+    return res.json({ mode: 'unavailable', detail: e.message });
+  }
+});
+
+// POST /api/report/:id  { datasetId? } -> { id, mode, model?, text }
+// Drafts the IR report for a server-side incident using the LOCAL model
+// (Ollama). No API key, no external service. Falls back to the deterministic
+// mock template if the local daemon is unreachable.
 router.post('/report/:id', async (req, res) => {
   const d = resolveDataset(req.body && req.body.datasetId);
   if (!d) return res.status(404).json({ error: 'нет датасетов' });
   const inc = incidentDetail(d, req.params.id);
   if (!inc) return res.status(404).json({ error: 'инцидент не найден', detail: req.params.id });
-
-  const apiKey = req.body && req.body.apiKey ? String(req.body.apiKey).trim() : '';
-  // Validate the client-supplied key shape before forwarding it to Anthropic.
-  // The key is NEVER stored server-side — it lives only for this request. An
-  // obviously-malformed value falls back to the offline mock report.
-  const validKey = apiKey && /^sk-ant-[A-Za-z0-9_-]{20,200}$/.test(apiKey);
-  if (apiKey && !validKey) {
-    return res.json({
-      id: inc.id,
-      mode: 'mock',
-      text: 'Неверный формат API-ключа Anthropic (ожидается sk-ant-...).\n\n--- Показан mock-черновик ---\n\n' + mockReport(inc),
-    });
+  // Fast-fail guard: probe the local daemon (1.5s) before the full report
+  // generation so an unreachable Ollama falls back to the deterministic mock in
+  // <3s instead of blocking on the chat timeout.
+  if (!(await ollamaUp())) {
+    return res.json({ id: inc.id, mode: 'mock', detail: 'ollama недоступна (probe)', text: mockReport(inc) });
   }
-  if (validKey) {
-    try {
-      const text = await claudeReport(inc, apiKey);
-      return res.json({ id: inc.id, mode: 'claude', model: 'claude-opus-4-8', text });
-    } catch (e) {
-      // graceful fallback — never hard-fail
-      const fallback =
-        'Ошибка вызова Claude API: ' + e.message + '\n\n--- Показан mock-черновик ---\n\n' + mockReport(inc);
-      return res.json({ id: inc.id, mode: 'mock', text: fallback });
-    }
+  try {
+    const text = await ollamaReport(inc);
+    return res.json({ id: inc.id, mode: 'ollama', model: OLLAMA_MODEL, text });
+  } catch (e) {
+    return res.json({ id: inc.id, mode: 'mock', detail: e.message, text: mockReport(inc) });
   }
-  return res.json({ id: inc.id, mode: 'mock', text: mockReport(inc) });
 });
 
 module.exports = router;

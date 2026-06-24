@@ -84,8 +84,11 @@ Layout is computed client-side; the server only ships nodes+edges+cycle+kinds. `
 
 ## REPORT
 
-### `POST /api/report/:id`  body `{ apiKey? }`
-`{ id, mode:"claude"|"mock", model?:"claude-opus-4-8", text }`. If a Claude call fails → graceful fallback `mode:"mock"` (never hard-fail).
+### `POST /api/report/:id`  body `{}`  (no key)
+`{ id, mode:"ollama"|"mock", model?:"qwen2.5:7b", text }`. The narrative is drafted by a **local LLM via Ollama** (on-prem, env-overridable `OLLAMA_URL`/`OLLAMA_MODEL`, default `127.0.0.1:11434` / `qwen2.5:7b`) — no API key, no external/cloud API. If the local Ollama daemon is unreachable → graceful fallback `mode:"mock"` (deterministic offline template, never hard-fail). The report narrative is cosmetic and **never computes the score/verdict**.
+
+### `POST /api/report/draft`  body `{ prompt }`
+Proxy used by the in-browser demo to draft free-form report text against the **local Ollama daemon**. `prompt` is a string capped at ~16000 chars; the server applies a fixed system prompt (the client cannot inject the system role). Response: `{ mode:"ollama"|"unavailable", model?:"qwen2.5:7b", text? }`. If Ollama is unreachable → `mode:"unavailable"` (the UI then shows the deterministic mock). No key, no external API.
 
 ---
 

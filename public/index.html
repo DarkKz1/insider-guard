@@ -179,7 +179,7 @@ const { useState, useMemo, useEffect, useRef } = React;
 /* =====================================================================
    AI Shield — Insider Guard · прототип для трека AI Shield (id: ai-shield), AFM AI Hackathon 2026
    Полностью оффлайн. Детерминированный mock-AI (UEBA-граф + эвристики на baseline + scoring + SHAP-like).
-   Опционально: реальный вызов Claude (opus) для генерации черновика инцидент-отчёта.
+   Опционально: вызов ЛОКАЛЬНОЙ модели (Ollama, qwen2.5:7b) для генерации черновика инцидент-отчёта.
    ВСЕ ДАННЫЕ СИНТЕТИЧЕСКИЕ. ИИН/ФИО/IP вымышлены. Никаких реальных персональных данных.
 
    Якорь: утечка 16,3 млн записей РК (июнь 2025) — НЕ взлом периметра, а инсайдер
@@ -862,7 +862,7 @@ function anomalyStats(cs) {
    НЕЗАВИСИМАЯ AI-МОДЕЛЬ · ISOLATION FOREST (на устройстве, без зависимостей)
    ---------------------------------------------------------------------
    Это НАША собственная AI-модель — отдельный, НЕЗАВИСИМЫЙ unsupervised-сигнал.
-   НЕ Claude, НЕ внешний API, НЕ библиотека: классический Isolation Forest
+   НЕ LLM, НЕ внешний API, НЕ библиотека: классический Isolation Forest
    (Liu, Ting & Zhou, ICDM 2008), реализованный с нуля на чистом JavaScript и
    работающий ПОЛНОСТЬЮ ОФФЛАЙН в браузере. Зависимостей нет, сети нет.
 
@@ -1266,7 +1266,7 @@ async function sealHash(cs, res, events) {
 /* ---------------------------------------------------------------------
    ГЕНЕРАЦИЯ ЧЕРНОВИКА ИНЦИДЕНТ-ОТЧЁТА (IR report)
    Mock: детерминированный шаблон из триггеров.
-   Опционально: реальный вызов Claude если введён ключ.
+   Локальная модель (Ollama) через серверный прокси /api/report/draft; mock — offline-fallback.
    --------------------------------------------------------------------- */
 function mockSAR(cs, res) {
   const trg = res.triggers.filter(t=>t.weight>0).map(t=>`• ${t.label}: ${t.detail}`).join('\n');
@@ -1293,32 +1293,27 @@ ${recs}
 Примечание: документ — машинный черновик для ускорения работы SOC/инцидент-аналитика. Не является процессуальным решением. Все данные в прототипе синтетические (ИИН/ФИО/IP вымышлены).`;
 }
 
-async function claudeSAR(cs, res, apiKey) {
-  const sys = `Ты — SOC / инцидент-аналитик (информационная безопасность гос-органа РК). Составь сжатый, формальный черновик ИНЦИДЕНТ-ОТЧЁТА (Incident Response) на русском языке по данным детект-движка UEBA. Структура: резюме инцидента, хронология событий, затронутые ресурсы и объём данных, индикаторы компрометации, рекомендации по реагированию/сдерживанию. Без воды, технически-точный тон, не выдумывай фактов сверх данных. Это синтетические данные для прототипа.`;
-  const user = `Инцидент ${cs.id}. Тип: ${cs.title}. Источник сигнала: ${cs.channel}.
+// Локальная LLM-генерация черновика отчёта через серверный прокси → Ollama.
+// On-prem, без внешних сервисов: браузер НЕ ходит в модель напрямую и НЕ хранит
+// ключей — Node-сервер форвардит запрос в локальную Ollama (127.0.0.1:11434),
+// system-промпт фиксируется на сервере. Бросает ошибку, если локальная модель
+// недоступна (тогда вызывающий показывает детерминированный mockSAR).
+async function localSAR(cs, res) {
+  const prompt = `Инцидент ${cs.id}. Тип: ${cs.title}. Источник сигнала: ${cs.channel}.
 Обстоятельства: ${cs.facts}
 Risk-score: ${res.score}/100, приоритет ${res.priority.lvl}.
 Хронология:\n${cs.events.map(e=>`- ${e.ts} ${e.user} ${e.action} ${e.resource} ${e.rows?fmt(e.rows)+' строк':''} ${e.geo} ${e.ip}`).join('\n')}
 Индикаторы (триггеры):\n${res.triggers.filter(t=>t.weight>0).map(t=>`- ${t.label}: ${t.detail}`).join('\n')}
 Граф доступа: ${res.graphStats.nodes} узлов, ${res.graphStats.edges} событий, объём ${fmt(res.graphStats.totalRows)} строк.`;
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
+  const r = await fetch('/api/report/draft', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({
-      model: 'claude-opus-4-8',
-      max_tokens: 1100,
-      system: sys,
-      messages: [{ role:'user', content: user }],
-    }),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt }),
   });
-  if (!r.ok) throw new Error('API ' + r.status + ': ' + (await r.text()).slice(0,200));
+  if (!r.ok) throw new Error('LLM ' + r.status + ': ' + (await r.text()).slice(0,200));
   const j = await r.json();
-  return j.content?.map(c=>c.text).join('') || '(пустой ответ)';
+  if (j.mode !== 'ollama' || !j.text) throw new Error(j.detail || 'локальная модель недоступна');
+  return j.text;
 }
 
 /* ---------------------------------------------------------------------
@@ -2146,19 +2141,14 @@ function App() {
   }, [baseAnalyzed, alertThreshold]);
 
   const genSAR = async () => {
-    if (apiKey.trim()) {
-      setSarLoading(true); setSarMode('claude');
-      try {
-        const t = await claudeSAR(sel.cs, sel.res, apiKey.trim());
-        setSarText(t);
-      } catch (e) {
-        setSarText('Ошибка вызова Claude API: ' + e.message + '\n\n--- Показан mock-черновик ---\n\n' + mockSAR(sel.cs, sel.res));
-        setSarMode('mock');
-      } finally { setSarLoading(false); }
-    } else {
-      setSarMode('mock');
-      setSarText(mockSAR(sel.cs, sel.res));
-    }
+    setSarLoading(true); setSarMode('ollama');
+    try {
+      const t = await localSAR(sel.cs, sel.res);
+      setSarText(t); setSarMode('ollama');
+    } catch (e) {
+      // локальная модель недоступна (демон не запущен / serverless) → детерминированный mock
+      setSarText(mockSAR(sel.cs, sel.res)); setSarMode('mock');
+    } finally { setSarLoading(false); }
   };
 
   // hero-статус: сколько реальных угроз / критических в очереди (одна спокойная строка в шапке)
@@ -2904,7 +2894,7 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                 </div>
                 <p className="text-[10.5px] text-ink4 mt-2 leading-snug max-w-[440px]">
                   Наша собственная unsupervised AI-модель, обученная на {iforest.corpus} синтетических фоновых user-day нормы.
-                  Отдельный сигнал, независимый от Claude и любых API — работает офлайн, без сети. Не входит в Σ risk-score (показан рядом, как контроль).
+                  Отдельный сигнал, независимый от LLM и любых API — работает офлайн, без сети. Не входит в Σ risk-score (показан рядом, как контроль).
                 </p>
               </div>
               <div className="shrink-0 text-right">
@@ -2955,7 +2945,7 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                 </div>
                 <div>
                   <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Внешние сервисы</div>
-                  <div className="leading-snug" style={{color:'#59D499'}}>НЕТ — работает офлайн на устройстве. Не Claude, не API.</div>
+                  <div className="leading-snug" style={{color:'#59D499'}}>НЕТ — работает офлайн на устройстве. Не LLM, не API.</div>
                 </div>
                 <div className="sm:col-span-2">
                   <div className="t-eyebrow text-[8.5px] text-ink5 mb-1">Вектор признаков этого инцидента <span className="text-ink5/70 normal-case tracking-normal">· наведи на значение — имя признака</span></div>
@@ -3122,21 +3112,19 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
               {showReport && (
                 <div className="mt-5 fade-in">
                   <div className="flex items-center gap-2.5 mb-4 flex-wrap">
-                    <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
-                      placeholder="Anthropic API-ключ (опц.) — иначе mock"
-                      className="text-[12px] bg-panel2 border border-edge rounded-lg px-3 py-2 w-64 font-mono text-ink1 placeholder:text-ink4 focus:border-accent outline-none transition" />
                     <button onClick={genSAR} disabled={sarLoading}
                       className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px] disabled:opacity-50">
                       {sarLoading ? 'Генерация…' : '▸ Собрать черновик'}
                     </button>
+                    <span className="text-[10.5px] text-ink4 font-mono">локальная модель (Ollama · qwen2.5:7b) — on-prem, без внешних сервисов и ключей</span>
                   </div>
-                  {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='claude'?'#59D499':'#FFC533'}}>
-                    <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='claude'?'#59D499':'#FFC533'}}></span>
-                    {sarMode==='claude' ? 'Сгенерировано через Claude (claude-opus-4-8)' : 'Mock-режим (детерминированный шаблон, без сети)'}
+                  {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='ollama'?'#59D499':'#FFC533'}}>
+                    <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='ollama'?'#59D499':'#FFC533'}}></span>
+                    {sarMode==='ollama' ? 'Сгенерировано локальной моделью (Ollama · qwen2.5:7b), on-prem без сети' : 'Mock-режим (детерминированный шаблон, без сети)'}
                   </p>}
                   {sarText
                     ? <pre className="scanline text-[11.5px] text-ink2 whitespace-pre-wrap leading-relaxed bg-panel rounded-xl p-5 border border-edge font-mono fade-in">{sarText}</pre>
-                    : <p className="text-[12px] text-ink4 leading-snug">Нажмите «Собрать черновик» — движок соберёт инцидент-отчёт из триггеров (mock) или вызовет Claude, если введён ключ.</p>}
+                    : <p className="text-[12px] text-ink4 leading-snug">Нажмите «Собрать черновик» — локальная модель (Ollama) соберёт инцидент-отчёт; если демон недоступен — детерминированный mock-шаблон.</p>}
                 </div>
               )}
             </div>

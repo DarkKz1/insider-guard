@@ -70,9 +70,10 @@ async function main() {
   assert(r.data.naive && typeof r.data.naive.reduction === 'number', 'metrics.naive.reduction');
   console.log('  metrics@55:', JSON.stringify({ confusion: r.data.confusion, precision: r.data.quality.precision, recall: r.data.quality.recall, auprc: r.data.quality.auprc, naive: r.data.naive }));
 
-  // report (mock)
+  // report — local model (Ollama) if the daemon is up, else deterministic mock.
+  // Either mode is a valid contract outcome; both carry a usable text body.
   r = await j('POST', '/api/report/' + incId, {});
-  assert(r.status === 200 && r.data.mode === 'mock' && typeof r.data.text === 'string' && r.data.text.length > 50, 'POST /api/report/:id mock');
+  assert(r.status === 200 && (r.data.mode === 'ollama' || r.data.mode === 'mock') && typeof r.data.text === 'string' && r.data.text.length > 50, 'POST /api/report/:id (ollama|mock)');
 
   // ingest (JSON body, small synthetic with a clear anomaly)
   const events = [];
