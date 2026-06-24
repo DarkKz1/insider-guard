@@ -1887,6 +1887,29 @@ function TamperSeal({ cs, res }) {
     } finally { setBusy(false); }
   };
 
+  // EXPORT — скачать запечатанный артефакт {canonical, sha256, sealedAt} как .json (offline).
+  // Канон берём из cs.events (запечатанное состояние), НЕ из подделанного events — артефакт = оригинал печати.
+  const onExport = () => {
+    const canonical = canonicalIncident(cs, res, cs.events);
+    const artifact = {
+      incident: cs.id,
+      sealedAt: sealedAt,
+      sha256: sealedHash,
+      algorithm: 'SHA-256',
+      canonical: canonical,
+      note: 'Запечатанное досье инцидента (chain-of-custody). Хеш воспроизводим бит-в-бит из поля canonical. Все данные синтетические — AFM AI Hackathon 2026.',
+    };
+    const blob = new Blob([JSON.stringify(artifact, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dossier-${cs.id}-sealed.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
   const broken = sealedHash && currentHash && currentHash !== sealedHash;
   const fmtHash = (h) => h ? h.match(/.{1,8}/g).join(' ') : '';
 
@@ -1949,11 +1972,16 @@ function TamperSeal({ cs, res }) {
             )}
           </div>
 
-          {/* контрол подделки */}
+          {/* контрол подделки + экспорт запечатанного артефакта */}
           <div className="mt-6 flex items-center gap-3 flex-wrap">
+            <button onClick={onExport}
+              className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px]"
+              style={{ borderColor:'rgba(56,224,123,0.45)', color:'#38E07B' }}>
+              ↓ Скачать досье (.json)
+            </button>
             <button onClick={onTamper} disabled={busy}
               className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px] disabled:opacity-50"
-              style={broken ? undefined : { borderColor:'rgba(255,97,97,0.45)' }}>
+              style={broken ? { borderColor:'rgba(255,97,97,0.55)', color:'#FF6161' } : undefined}>
               ⚠ Подделать запись (rows +1)
             </button>
             {tampered && (
@@ -2079,6 +2107,19 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
           <p className="text-[12px] text-ink4 mt-3 font-mono">
             Источник сигнала · <span className="text-ink3">{cs.channel}</span>
           </p>
+          {/* SPEED PROOF — MTTD-контраст: real-time детект vs индустриальный MTTD 241 дней */}
+          <div className="mt-4 inline-flex items-stretch rounded-md overflow-hidden console-frame">
+            <div className="flex items-center gap-2 px-3 py-2 bg-panel/40">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent beacon shrink-0" style={{color:'#38E07B'}}></span>
+              <span className="t-eyebrow text-[9.5px]" style={{color:'#9FE7BC'}}>MTTD · детект</span>
+              <span className="font-mono font-bold text-[11px]" style={{color:'#38E07B'}}>real-time · миллисекунды/событие</span>
+            </div>
+            <div className="flex items-center gap-2 px-3 py-2" style={{background:'rgba(255,97,97,0.06)', borderLeft:'1px solid rgba(255,255,255,0.14)'}}>
+              <span className="font-mono text-[11px] leading-none" style={{color:'#6A6B6C'}}>vs</span>
+              <span className="font-mono font-bold text-[11px]" style={{color:'#FF6161'}}>241 дней</span>
+              <span className="font-mono text-[9.5px]" style={{color:'#9C9C9D'}}>индустр. MTTD инсайдера (IBM 2025)</span>
+            </div>
+          </div>
           <p className="text-[13px] mt-4 font-medium flex items-center gap-1.5" style={{color:pc}}>
             <span>▸</span>{res.priority.note}
           </p>
@@ -2172,18 +2213,9 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
         )}
       </section>
 
-      {/* ПЕРВИЧНОЕ ДЕЙСТВИЕ — рекомендация + одна кнопка. Полный плейбук/отчёт свёрнуты. */}
+      {/* РЕАГИРОВАНИЕ — плейбук + hash-chain журнал ВИДНЫ ПО УМОЛЧАНИЮ (detect→respond→prove без кликов) */}
       <section className="max-w-[760px]">
-        <p className="text-[13px] text-ink2 leading-relaxed mb-5">
-          {(RESPONSE[cs.typology] || [])[0] || 'Действий не требуется.'}
-        </p>
-        <button onClick={()=> setShowReport(v=>!v)}
-          className="btn-green rounded-lg px-5 py-2.5 t-eyebrow text-[11px]">
-          Сформировать инцидент-отчёт
-        </button>
-
-        {showReport && (
-          <div className={`mt-8 fade-in ${auditLog.length === 0 ? 'space-y-6' : 'space-y-10'}`}>
+        <div className={`${auditLog.length === 0 ? 'space-y-6' : 'space-y-10'}`}>
             {/* полный плейбук — раскрытый, с тир-бейджами автономности (human-in-the-loop) */}
             <div>
               <div className="flex items-center gap-2.5 mb-4 flex-wrap">
@@ -2280,27 +2312,34 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
               </div>
             )}
 
-            {/* генерация отчёта */}
+            {/* ОПЦИОНАЛЬНО — LLM-генерация черновика отчёта (за toggle). detect→respond→prove виден без кликов выше. */}
             <div>
-              <div className="flex items-center gap-2.5 mb-4 flex-wrap">
-                <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
-                  placeholder="Anthropic API-ключ (опц.) — иначе mock"
-                  className="text-[12px] bg-panel2 border border-edge rounded-lg px-3 py-2 w-64 font-mono text-ink1 placeholder:text-ink4 focus:border-accent outline-none transition" />
-                <button onClick={genSAR} disabled={sarLoading}
-                  className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px] disabled:opacity-50">
-                  {sarLoading ? 'Генерация…' : '▸ Собрать черновик'}
-                </button>
-              </div>
-              {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='claude'?'#59D499':'#FFC533'}}>
-                <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='claude'?'#59D499':'#FFC533'}}></span>
-                {sarMode==='claude' ? 'Сгенерировано через Claude (claude-opus-4-8)' : 'Mock-режим (детерминированный шаблон, без сети)'}
-              </p>}
-              {sarText
-                ? <pre className="scanline text-[11.5px] text-ink2 whitespace-pre-wrap leading-relaxed bg-panel rounded-xl p-5 border border-edge font-mono fade-in">{sarText}</pre>
-                : <p className="text-[12px] text-ink4 leading-snug">Нажмите «Собрать черновик» — движок соберёт инцидент-отчёт из триггеров (mock) или вызовет Claude, если введён ключ.</p>}
+              <button onClick={()=> setShowReport(v=>!v)}
+                className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px]">
+                {showReport ? '− скрыть LLM-черновик отчёта' : '+ LLM-черновик инцидент-отчёта (опц.)'}
+              </button>
+              {showReport && (
+                <div className="mt-5 fade-in">
+                  <div className="flex items-center gap-2.5 mb-4 flex-wrap">
+                    <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
+                      placeholder="Anthropic API-ключ (опц.) — иначе mock"
+                      className="text-[12px] bg-panel2 border border-edge rounded-lg px-3 py-2 w-64 font-mono text-ink1 placeholder:text-ink4 focus:border-accent outline-none transition" />
+                    <button onClick={genSAR} disabled={sarLoading}
+                      className="btn-ghost rounded-lg px-4 py-2 t-eyebrow text-[10px] disabled:opacity-50">
+                      {sarLoading ? 'Генерация…' : '▸ Собрать черновик'}
+                    </button>
+                  </div>
+                  {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='claude'?'#59D499':'#FFC533'}}>
+                    <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='claude'?'#59D499':'#FFC533'}}></span>
+                    {sarMode==='claude' ? 'Сгенерировано через Claude (claude-opus-4-8)' : 'Mock-режим (детерминированный шаблон, без сети)'}
+                  </p>}
+                  {sarText
+                    ? <pre className="scanline text-[11.5px] text-ink2 whitespace-pre-wrap leading-relaxed bg-panel rounded-xl p-5 border border-edge font-mono fade-in">{sarText}</pre>
+                    : <p className="text-[12px] text-ink4 leading-snug">Нажмите «Собрать черновик» — движок соберёт инцидент-отчёт из триггеров (mock) или вызовет Claude, если введён ключ.</p>}
+                </div>
+              )}
             </div>
           </div>
-        )}
       </section>
 
       {/* ДОКАЗАТЕЛЬСТВО — SHA-256 tamper-seal (chain-of-custody) */}

@@ -31,7 +31,12 @@
 2. **SHA-256 tamper-seal** — «Запечатать досье» → меняем одно число → хеш краснеет `INTEGRITY BROKEN`. Алерт превращается в доказательство, работает offline.
 3. **Honeytoken 0-FP** — касание decoy-ресурса → score 100, `DECEPTION_TRIPPED — детерминированный, 0% ложных`.
 4. **Exact-attribution waterfall** — SHAP-водопад + бейдж «Σ = score (exact)»: вклады складываются в score математически точно, проверяемо.
-5. **Авто-IR-досье** — investigation-план grounded в shap/triggers + MITRE-маппинг + recommended actions с tiered autonomy.
+5. **Авто-IR-досье + реагирование видно сразу** — investigation-план grounded в shap/triggers + MITRE-маппинг + recommended actions с **tiered autonomy (AUTO/APPROVE/HIGH-RISK)**; действие сразу пишется в **append-only hash-chain audit-log**.
+
+**Дополнительно (в продукте):**
+
+- **Real-time MTTD** — детект по потоку access-логов за секунды против **241 дня** среднего MTTD (IBM 2025); big-number счётчик «241 days → seconds».
+- **Экспорт запечатанного досье** — выгрузка инцидента в `.json` с SHA-256 **chain-of-custody**: досье воспроизводимо бит-в-бит, пригодно как доказательство для следствия.
 
 ## Метрики (честно, на дисбалансе)
 
