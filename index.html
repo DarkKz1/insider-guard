@@ -1481,8 +1481,17 @@ function App() {
     const naiveAlerts = naiveTP + naiveFP;
     // Снижение ложных тревог: наш инструмент против наивного DLP (в нашу пользу, без двойного минуса).
     const reduction = naiveFP > 0 ? Math.max(0, Math.round((1 - FP / naiveFP) * 100)) : 0;
+
+    // --- КОНТЕКСТ для AUPRC + ловушка accuracy (всё из уже посчитанных чисел, не выдумано) ---
+    // prevalence = доля угроз в корпусе = baseline для случайного ранжировщика (AUPRC_random ≈ prevalence).
+    const prevalence = total ? illicit / total : 0;
+    // lift = во сколько раз наш AUPRC выше случайного baseline=prevalence.
+    const auprcLift = prevalence > 0 ? auprc / prevalence : 0;
+    // Наивная пустышка always-benign: НИКОГДА не флагает → ловит 0 угроз, recall 0%, но accuracy = TN-доля.
+    const dummyAccuracy = total ? benign / total : 0; // все benign «верны», все illicit пропущены
     return { total, illicit, benign, TP, FP, FN, TN, precision, recall, f1, accuracy, alertsShown,
-      recallTopN, naiveAlerts, naiveTP, naiveFP, naiveFN, reduction, auprc };
+      recallTopN, naiveAlerts, naiveTP, naiveFP, naiveFN, reduction, auprc,
+      prevalence, auprcLift, dummyAccuracy };
   }, [analyzed, alertThreshold]);
 
   const genSAR = async () => {
@@ -1732,6 +1741,86 @@ function Validation({ threshold, setThreshold, m }) {
         <p className="text-[12px] text-ink4 mt-7 leading-relaxed max-w-[760px] flex gap-2">
           <span className="shrink-0" style={{color:'#FFC533'}}>⚠</span>
           <span>Инсайдер-события редкие: классификатор-пустышка даёт ~99.9% accuracy и ловит ноль — поэтому метрика качества = AUPRC и recall@top-N, а не accuracy.</span>
+        </p>
+      </section>
+
+      {/* ЛОВУШКА ACCURACY — side-by-side: пустышка (красным) vs Insider Guard (зелёным) */}
+      <section>
+        <span className="t-eyebrow text-[11px] text-ink4">Ловушка accuracy · почему 99.9% ничего не значат</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-5">
+          {/* наивная пустышка always-benign — КРАСНЫМ */}
+          <div className="relative console-frame corner-4 rounded-xl px-7 py-7 overflow-hidden"
+               style={{ background:'#FF61610d', borderColor:'#FF616133' }}>
+            <span className="ctick tr"></span><span className="ctick bl"></span>
+            <div className="t-eyebrow text-[10px]" style={{color:'#FF6161'}}>наивная пустышка · always-benign</div>
+            <div className="font-mono font-extrabold text-[44px] leading-none kpi-tick mt-4" style={{color:'#FF6161'}}>
+              99.9%
+            </div>
+            <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">accuracy при доле угроз ~0.1%</div>
+            <div className="flex gap-8 mt-6">
+              <div>
+                <div className="font-mono font-bold text-[22px] leading-none" style={{color:'#FF6161'}}>0%</div>
+                <div className="text-[10px] uppercase tracking-wide text-ink4 mt-1.5">recall</div>
+              </div>
+              <div>
+                <div className="font-mono font-bold text-[22px] leading-none" style={{color:'#FF6161'}}>0 / {m.illicit}</div>
+                <div className="text-[10px] uppercase tracking-wide text-ink4 mt-1.5">угроз поймано</div>
+              </div>
+            </div>
+          </div>
+          {/* Insider Guard — ЗЕЛЁНЫМ */}
+          <div className="relative console-frame corner-4 stat-tint rounded-xl px-7 py-7 overflow-hidden">
+            <span className="ctick tr"></span><span className="ctick bl"></span>
+            <div className="t-eyebrow text-[10px]" style={{color:'#38E07B'}}>Insider Guard · поведенческий UEBA</div>
+            <div className="font-mono font-extrabold text-[44px] leading-none kpi-tick mt-4" style={{color:'#59D499'}}>
+              {m.recallTopN}%
+            </div>
+            <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">recall@top-{m.illicit}</div>
+            <div className="flex gap-8 mt-6">
+              <div>
+                <div className="font-mono font-bold text-[22px] leading-none" style={{color:'#59D499'}}>{pct(m.precision)}</div>
+                <div className="text-[10px] uppercase tracking-wide text-ink4 mt-1.5">precision</div>
+              </div>
+              <div>
+                <div className="font-mono font-bold text-[22px] leading-none" style={{color:'#59D499'}}>{m.TP} / {m.illicit}</div>
+                <div className="text-[10px] uppercase tracking-wide text-ink4 mt-1.5">поймано @ порог {threshold}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p className="text-[12px] text-ink4 mt-5 leading-relaxed max-w-[760px]">
+          В реальном потоке инсайдер-события — доли процента. При базовом уровне ~0.1% модель,
+          которая молчит всегда, «права» в 99.9% случаев и ловит ноль атак. Поэтому честная метрика
+          для редких событий — <span className="text-ink2 font-mono">recall@top-N</span> и <span className="text-ink2 font-mono">AUPRC</span>, а не accuracy.
+          <span className="block mt-1.5 text-ink5">Демо-корпус курирован для триажа (доля угроз высокая), поэтому цифры пустышки приведены для реального базового уровня ~0.1%.</span>
+        </p>
+      </section>
+
+      {/* AUPRC С КОНТЕКСТОМ — никогда голое число: baseline=prevalence + lift ×N */}
+      <section>
+        <span className="t-eyebrow text-[11px] text-ink4">AUPRC в контексте · vs случайный ранжировщик</span>
+        <div className="relative console-frame corner-4 stat-tint rounded-xl px-8 py-9 mt-5 overflow-hidden">
+          <span className="ctick tr"></span><span className="ctick bl"></span>
+          <div className="flex flex-wrap items-end gap-x-12 gap-y-8">
+            <div>
+              <div className="font-mono font-extrabold text-[40px] leading-none kpi-tick" style={{color:'#59D499'}}>{m.auprc.toFixed(3)}</div>
+              <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">AUPRC · наш</div>
+            </div>
+            <div className="font-mono text-[26px] text-ink5 leading-none pb-2">vs</div>
+            <div>
+              <div className="font-mono font-extrabold text-[40px] leading-none kpi-tick text-ink4">{m.prevalence.toFixed(3)}</div>
+              <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">baseline = prevalence</div>
+            </div>
+            <div>
+              <div className="font-mono font-extrabold text-[40px] leading-none kpi-tick" style={{color:'#38E07B'}}>×{m.auprcLift.toFixed(2)}</div>
+              <div className="text-[10.5px] uppercase tracking-[0.1em] mt-2.5 text-ink4">lift над случайным</div>
+            </div>
+          </div>
+        </div>
+        <p className="text-[12px] text-ink4 mt-5 leading-relaxed max-w-[760px]">
+          Случайный ранжировщик даёт AUPRC ≈ доле угроз (prevalence = {m.prevalence.toFixed(3)} на демо-корпусе). Наш AUPRC {m.auprc.toFixed(3)} —
+          в <span className="text-ink2 font-mono">×{m.auprcLift.toFixed(2)}</span> выше этого пола. Голое «AUPRC = {m.auprc.toFixed(3)}» без baseline ничего не говорит — поэтому показываем оба.
+          <span className="block mt-1.5 text-ink5">На реальном потоке доля угроз ~0.1% → случайный baseline ≈ 0.001, и AUC-PR становится единственной осмысленной метрикой для редких событий.</span>
         </p>
       </section>
 
@@ -2036,6 +2125,11 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
             {!anom.isAnomaly && <span className="text-ink5"> · в пределах нормы</span>}
           </p>
         )}
+        {anom.maxZ >= 1 && (
+          <p className="text-[10px] text-ink4 -mt-4 mb-6 leading-snug">
+            непараметрический детектор аномалий, не правило if-then
+          </p>
+        )}
         {anom.maxZ < 1 && <div className="mb-6" />}
         {res.shap.length === 0 && (
           <div className="flex items-center gap-2.5 text-[13px]" style={{color:'#59D499'}}>
@@ -2089,7 +2183,7 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
         </button>
 
         {showReport && (
-          <div className="mt-8 space-y-10 fade-in">
+          <div className={`mt-8 fade-in ${auditLog.length === 0 ? 'space-y-6' : 'space-y-10'}`}>
             {/* полный плейбук — раскрытый, с тир-бейджами автономности (human-in-the-loop) */}
             <div>
               <div className="flex items-center gap-2.5 mb-4 flex-wrap">
@@ -2140,9 +2234,9 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
 
             {/* ЖУРНАЛ РЕАГИРОВАНИЯ — append-only hash-chain (chain-of-custody действий) */}
             {(
-              <div className="relative console-frame corner-4 rounded-xl px-6 py-6 bg-panel/40 fade-in">
+              <div className={`relative console-frame corner-4 rounded-xl px-6 bg-panel/40 fade-in ${auditLog.length === 0 ? 'py-4' : 'py-6'}`}>
                 <span className="ctick tr"></span><span className="ctick bl"></span>
-                <div className="flex items-center gap-2.5 mb-4 flex-wrap">
+                <div className={`flex items-center gap-2.5 flex-wrap ${auditLog.length === 0 ? 'mb-2.5' : 'mb-4'}`}>
                   <span className="pill-green rounded-md px-2.5 py-1 t-eyebrow text-[10px]">
                     <span className="w-1.5 h-1.5 rounded-full bg-accent"></span> Журнал реагирования · hash-chain
                   </span>
@@ -2163,13 +2257,15 @@ function Detail({ cs, res, apiKey, setApiKey, sarText, sarLoading, sarMode, genS
                         <span className="shrink-0 font-mono text-[10px] text-ink5 mt-1 w-5">#{a.idx+1}</span>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-[9px] leading-none px-1.5 py-0.5 rounded font-mono font-semibold uppercase tracking-wide"
-                              style={{ color:tc, border:'1px solid '+tc+'40' }}>{TIERS[a.tier].label}</span>
+                            <span className="inline-flex items-center gap-1 text-[9px] leading-none px-1.5 py-1 rounded-md font-mono font-semibold uppercase tracking-wide"
+                              style={{ background:tc+'1a', color:tc, border:'1px solid '+tc+'40' }}>
+                              <span className="w-1 h-1 rounded-full" style={{background:tc, boxShadow:`0 0 5px ${tc}`}}></span>
+                              {TIERS[a.tier].label}</span>
                             <span className="text-[12px] text-ink2 leading-snug">{a.action}</span>
                           </div>
                           <div className="font-mono text-[9.5px] text-ink5 mt-1 break-all leading-relaxed">
                             <span className="text-ink4">{a.ts}</span><br/>
-                            <span style={{color:'#59A877'}}>prev </span>{a.prevHash.slice(0,16)}…
+                            <span className="text-ink5">prev </span><span className="text-ink4">{a.prevHash.slice(0,16)}…</span>
                             <span className="mx-1 text-ink5">→</span>
                             <span style={{color:'#38E07B'}}>{a.hash.slice(0,16)}…</span>
                           </div>
