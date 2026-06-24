@@ -3118,7 +3118,7 @@ function Detail({ cs, res, ml, iforest, apiKey, setApiKey, sarText, sarLoading, 
                     </button>
                     <span className="text-[10.5px] text-ink4 font-mono">локальная модель (Ollama · qwen2.5:7b) — on-prem, без внешних сервисов и ключей</span>
                   </div>
-                  {sarMode && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='ollama'?'#59D499':'#FFC533'}}>
+                  {sarMode && sarText && <p className="text-[10.5px] mb-3 font-mono flex items-center gap-1.5" style={{color: sarMode==='ollama'?'#59D499':'#FFC533'}}>
                     <span className="w-1.5 h-1.5 rounded-full" style={{background: sarMode==='ollama'?'#59D499':'#FFC533'}}></span>
                     {sarMode==='ollama' ? 'Сгенерировано локальной моделью (Ollama · qwen2.5:7b), on-prem без сети' : 'Mock-режим (детерминированный шаблон, без сети)'}
                   </p>}

@@ -11,3 +11,8 @@ data/.store.*.tmp
 .playwright-mcp/
 *.bak
 *.png
+.gstack/
+
+# README assets (override *.png)
+!assets/
+!assets/*.png

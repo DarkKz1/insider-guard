@@ -1,19 +1,99 @@
-# Insider Guard — объяснимый AI-страж инсайдерских угроз
+<div align="center">
 
-**Трек AI Shield** (`id: ai-shield`), AFM AI Hackathon 2026 (Алматы, 24–25 июня) — защита данных / антихакинг.
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:020617,45:064e3b,100:16a34a&height=210&section=header&text=Insider%20Guard&fontSize=62&fontColor=eafff4&fontAlignY=40&desc=Explainable%20AI%20sentinel%20for%20insider%20threats&descAlignY=63&descSize=18" width="100%" alt="Insider Guard"/>
 
-> **DLP видит периметр, SIEM видит сигнатуры — Insider Guard видит ПОВЕДЕНИЕ.**
-> Поток access/audit-логов (кто → к какому ресурсу → с какого хоста) → детект **инсайдера
-> и компрометации аккаунта** по отклонению от поведенческого baseline пользователя (**UEBA**)
-> → **человекочитаемое объяснение, почему помечено** + рекомендация реагирования (IR-плейбук)
-> + **приоритизированная очередь** инцидентов для SOC. Превенция следующей утечки 16,3 млн ИИН,
-> а не разбор после.
+<p>
+<a href="https://insider-guard-demo-production.up.railway.app"><img src="https://img.shields.io/badge/%E2%96%B6%20Live%20Demo-Railway-16a34a?style=for-the-badge&logo=railway&logoColor=white" alt="Live demo on Railway"></a>
+&nbsp;
+<a href="https://insider-guard.vercel.app"><img src="https://img.shields.io/badge/%E2%96%B6%20Live%20Demo-Vercel-000000?style=for-the-badge&logo=vercel&logoColor=white" alt="Live demo on Vercel"></a>
+</p>
 
-🔗 **Live demo:** https://insider-guard.vercel.app · 🗂 [SUBMISSION.md](SUBMISSION.md) (одностраничник для жюри) · 📋 [CRITERIA.md](CRITERIA.md) (соответствие 5 официальным критериям трека)
+<p>
+<img src="https://img.shields.io/badge/AFM%20AI%20Hackathon%202026-AI%20Shield-16a34a?style=flat-square" alt="track">
+<img src="https://img.shields.io/badge/UEBA-insider%20threat-052e16?style=flat-square" alt="ueba">
+<img src="https://img.shields.io/badge/AI-0%20ML%20deps%20%C2%B7%20on--device-22c55e?style=flat-square" alt="ai">
+<img src="https://img.shields.io/badge/deploy-100%25%20on--prem-064e3b?style=flat-square" alt="on-prem">
+<img src="https://img.shields.io/badge/Node-20-339933?style=flat-square&logo=node.js&logoColor=white" alt="node">
+<img src="https://img.shields.io/badge/license-MIT-555555?style=flat-square" alt="license">
+</p>
 
-> ⚠️ Всё на экране — **синтетика, 0 реальных ИИН**. Privacy-by-design: псевдонимизация, per-user baseline, human-in-the-loop.
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=600&size=20&pause=900&color=22C55E&center=true&vCenter=true&width=860&height=42&lines=Catching%20the%20insider%20the%20perimeter%20cannot%20see;DLP%20sees%20perimeter,%20SIEM%20sees%20signatures,%20we%20see%20BEHAVIOR;Explainable%20UEBA%20-%20SHAP%20sums%20exactly%20to%20the%20score;0%20ML%20deps%20-%20on-device%20model%20-%20100%25%20on-prem" alt="typing tagline"/>
 
-## Ключевые фичи
+</div>
+
+> **DLP видит периметр. SIEM видит сигнатуры. Insider Guard видит ПОВЕДЕНИЕ.**
+> Поток access/audit-логов → детект инсайдера и компрометации аккаунта по отклонению от
+> поведенческого baseline пользователя (**UEBA**) → **человекочитаемое объяснение, почему помечено**
+> + рекомендация реагирования (IR-плейбук) + **приоритизированная очередь** инцидентов для SOC.
+> Превенция следующей утечки 16,3 млн ИИН, а не разбор постфактум.
+
+<div align="center">
+<img src="assets/demo.gif" width="840" alt="Insider Guard — тур по продукту: очередь, attack-path граф, AI-модель и объяснимость, валидация"/>
+<br/>
+<sub>⚠️ Всё на экране — <b>синтетика, 0 реальных ИИН</b>. Privacy-by-design: псевдонимизация · per-user baseline · human-in-the-loop.</sub>
+</div>
+
+---
+
+## 🎯 Зачем это нужно сейчас
+
+**Утечка 16,3 млн записей РК (июнь 2025) — это был инсайдер с авторизованным доступом, а не взлом периметра.**
+Файрвол, антивирус и DLP такое не ловят: запрос к базе выглядит «легально». Единственное, что выдаёт
+инсайдера, — **аномалия его собственного поведения**: выгрузка в десятки раз больше нормы, ночью, по таблице ПДн.
+
+Контекст (IBM 2025): malicious insider — самый дорогой вектор (**$4,92M**), средний MTTD — **241 день**.
+Insider Guard сжимает эти 241 день до **секунд**: движок считает норму сам и поднимает злоумышленника в топ очереди.
+
+## 🧠 Что это
+
+Дашборд SOC / инцидент-аналитика. На вход — **access/audit-логи** (журналы доступа к БД, аутентификации
+хостов, IAM-grant'ов, исходящих выгрузок). На выход — **приоритизированная очередь инцидентов** с risk-score
+0–100, **графом доступа**, **объяснением по факторам** (SHAP-подобная декомпозиция, где Σ вкладов === score)
+и черновиком IR-отчёта.
+
+Детект строится не на сигнатурах атаки, а на **отклонении от персонального baseline самого пользователя**:
+объём, время, широта доступа, привилегии, гео/устройство. Инструмент **не заменяет** аналитика, а **сортирует
+его работу** (самое опасное наверх) и **объясняет каждое решение**, чтобы человек мог проверить.
+
+## 🏗 Архитектура
+
+```mermaid
+flowchart LR
+    A["Access / audit логи<br/>CSV · JSON · поток"] --> B["UEBA-движок<br/>baseline из истории<br/>leave-one-day-out"]
+    B --> C{"Батарея триггеров<br/>относительно личной нормы"}
+    C --> D["Risk-score 0-100<br/>Sigma SHAP === score"]
+    C --> E["Attack-path граф<br/>MITRE ATT&CK"]
+    D --> F["Очередь SOC<br/>P1 - P4"]
+    F --> G["Черновик IR-отчёта<br/>ЛОКАЛЬНАЯ модель · Ollama"]
+    M["Isolation Forest<br/>+ robust-MAD<br/>на устройстве"] -. подтверждает .-> D
+
+    style A fill:#052e16,stroke:#16a34a,color:#eafff4
+    style B fill:#052e16,stroke:#16a34a,color:#eafff4
+    style C fill:#0b3d2e,stroke:#22c55e,color:#eafff4
+    style D fill:#064e3b,stroke:#22c55e,color:#eafff4
+    style E fill:#064e3b,stroke:#22c55e,color:#eafff4
+    style F fill:#064e3b,stroke:#22c55e,color:#eafff4
+    style G fill:#0b3d2e,stroke:#22c55e,color:#eafff4
+    style M fill:#2a0b0b,stroke:#ef4444,color:#fee2e2
+```
+
+## 🤖 AI на устройстве — ноль внешних API
+
+Каждая модель в продукте **локальна**. Продукт не делает ни одного внешнего сетевого вызова — отключи
+интернет, и детект, score, SHAP, граф, метрики и даже черновик отчёта работают полностью.
+
+| Слой | Что это | Где |
+|---|---|---|
+| **Isolation Forest** | Полноценный лес (Liu/Ting/Zhou, ICDM 2008), реализован с нуля на чистом JS, **0 ML-зависимостей**. Обучен на ~980 синтетических фоновых user-day; сырой anomaly `2^(−E[h]/c)`, виден в UI (чип `iForest` + MODEL CARD). | `index.html` → `buildIForest` |
+| **Robust modified z-score (MAD)** | Unsupervised-аномалия «×N от своей нормы И ×M от медианы роли», устойчивая к выбросам, без меток. | `server/lib/fmt.js` · `server/engine.js` |
+| **Honeytoken / DECEPTION_TRIPPED** | Детерминированный 0-FP слой поверх вероятностной AI: касание decoy → score 100 по факту (MITRE T1546). | `server/engine.js` |
+| **IR-отчёт (LLM)** | Нарратив черновика отчёта генерит **локальная модель через Ollama** (`qwen2.5:7b`), on-prem, без ключа. Никогда не считает score — только текст поверх готовых фактов. Mock-шаблон — offline-fallback. | `server/lib/llm.js` · `server/report.js` |
+
+> Источник вердикта (Σ===score) — **детерминированные UEBA-эвристики**, выбранные осознанно под imbalance ~10⁻⁶
+> и аудируемость. AI-модели работают **рядом** как независимые сигналы; LLM — строго поверх посчитанного результата
+> (анти-паттерн «LLM as source of truth» исключён архитектурно).
+
+## ✨ Возможности
 
 - **UEBA с computed baseline** — норма каждого пользователя считается из его истории (leave-one-day-out), а не хардкодится.
 - **Exact-attribution (Σ SHAP === score)** — аддитивная декомпозиция «почему помечено», сумма вкладов бит-в-бит равна score.
@@ -21,15 +101,28 @@
 - **MITRE ATT&CK-бейджи** — каждый триггер маппится на технику (T1021/T1048/T1074/T1078/T1098/T1213/T1530/T1566).
 - **Kill-chain ribbon** — тактики атаки от Initial Access до Exfiltration.
 - **SHA-256 tamper-seal** — криптографическая печать досье; правка одного числа → `INTEGRITY BROKEN`.
-- **Honeytoken / DECEPTION_TRIPPED** — детерминированный 0-FP слой поверх вероятностного UEBA.
-- **Две независимые AI-модели на устройстве (крит. #2)** — (1) **robust modified z-score (median/MAD)**, сигнал «×N от своей нормы И от пиров» (`server/lib/fmt.js` → `madZScores`, `server/engine.js` → `peerGroupMad`); (2) **полноценный Isolation Forest** (Liu/Ting/Zhou, ICDM 2008) — реализован с нуля на чистом JS, **0 ML-зависимостей**, **обучен на ~980 синтетических фоновых user-day из ролевых распределений `ROLE_NORMS`** (140 на роль × 7 ролей; novelty detection — инциденты НЕ обучают лес, а скорятся против обученной нормы), **виден в UI** (чип `iForest` + развёрнутый MODEL CARD), seeded-детерминизм (mulberry32, seed 1337, ψ=256, T=100; `index.html` → `buildIForest`). Обе — без внешних сервисов, на устройстве. Поверх вероятностной AI — детерминированный **0-FP honeytoken-слой** (defense-in-depth): на honeytoken-кейсе (доступ к decoy off-hours) IF даёт **score ≈ 0.79 > τ=0.72** — тоже флагает приманку, обе линии согласованы; детерминированный слой — это **гарантия 0-FP по построению**, ловит касание decoy даже если бы оно выглядело поведенчески нормально. IR-нарратив генерит **локальная модель** (Ollama, `qwen2.5:7b`) on-prem — без внешних сервисов и без API-ключа; детерминированный mock-шаблон — offline-fallback. **Ноль внешних API во всём продукте.** LLM пишет только текст отчёта, score не считает.
-- **Real-time MTTD** — детект по потоку access-логов за секунды (vs 241 день среднего MTTD по IBM 2025).
-- **Реагирование видно сразу** — tiered-autonomy actions (AUTO/APPROVE/HIGH-RISK) + append-only hash-chain audit-log: ответ применяется и фиксируется в журнале мгновенно.
-- **Экспорт запечатанного досье** — выгрузка инцидента в `.json` с SHA-256 chain-of-custody (правка одного числа → `INTEGRITY BROKEN`).
-- **Честные rare-event метрики** — recall@topN / AUPRC / precision vs наивный DLP-порог, НЕ accuracy.
-- **Загрузка своего CSV access-лога → baseline из ваших данных** — перетащить лог во фронт или `POST /api/ingest`; движок считает per-user baseline (leave-one-day-out) из *ваших* событий, без предразметки. Готовый сэмпл для жюри — [`samples/`](samples/) ([`insider-access-log.csv`](samples/insider-access-log.csv)).
+- **Tiered-autonomy реагирование** — действия AUTO / APPROVE / HIGH-RISK + append-only hash-chain audit-log.
+- **Честные rare-event метрики** — recall@topN / AUPRC / precision vs наивный DLP-порог, **НЕ accuracy**.
+- **Загрузка своего CSV** — baseline считается из ваших данных без предразметки (drag-and-drop или `POST /api/ingest`).
+- **Real-time MTTD** — детект по потоку логов за секунды (vs 241 день среднего MTTD по IBM 2025).
 
-## Быстрый старт
+## 🖼 Скриншоты
+
+<table>
+<tr>
+<td width="50%"><img src="assets/screen-queue.png" alt="Очередь триажа"/><br/><div align="center"><b>Очередь триажа</b> · risk-score · MITRE · iForest</div></td>
+<td width="50%"><img src="assets/screen-incident.png" alt="Attack-path граф"/><br/><div align="center"><b>Attack-path граф</b> · кто → ресурс → хост</div></td>
+</tr>
+<tr>
+<td width="50%"><img src="assets/screen-iforest.png" alt="Isolation Forest + SHAP"/><br/><div align="center"><b>Isolation Forest + SHAP</b> · объяснимость</div></td>
+<td width="50%"><img src="assets/screen-validation.png" alt="Валидация"/><br/><div align="center"><b>Валидация</b> · TP/FP · AUPRC · recall@top-N</div></td>
+</tr>
+<tr>
+<td colspan="2"><img src="assets/screen-report.png" alt="IR-отчёт от локальной модели"/><br/><div align="center"><b>Черновик IR-отчёта</b> · сгенерирован <b>локальной моделью (Ollama · qwen2.5:7b)</b>, on-prem без сети</div></td>
+</tr>
+</table>
+
+## 🚀 Быстрый старт
 
 ```bash
 npm install          # express, multer, csv-parse, nanoid и т.д.
@@ -37,276 +130,64 @@ npm run seed         # корпус 40 пользователей × 30 дней
 npm start            # http://localhost:3000
 ```
 
----
-
-## Что это
-
-Дашборд SOC / инцидент-аналитика. На вход — **access/audit-логи** (журналы доступа к БД,
-аутентификации хостов, IAM-grant'ов, исходящих выгрузок). На выход — **приоритизированная
-очередь инцидентов** с risk-score 0–100, **графом доступа** (пользователь → ресурс → хост),
-**объяснением по факторам (SHAP-подобная аддитивная декомпозиция, Σ вкладов === score)**,
-рекомендацией реагирования и кнопкой **«сформировать черновик инцидент-отчёта (IR report)»**.
-
-Ключевая идея: продукт ловит угрозу, которую **периметровый DLP/SIEM не видит** — у инсайдера
-доступ **легальный**. Детект строится не на сигнатурах атаки, а на **отклонении от
-персонального baseline самого пользователя** (UEBA): объём, время, широта доступа, привилегии,
-гео/устройство. Инструмент **не заменяет** аналитика, а **сортирует его работу** (самое опасное
-наверх) и **объясняет каждое решение**, чтобы человек мог проверить.
-
-## Якорь: зачем это нужно сейчас (16,3 млн)
-
-**Утечка 16,3 млн записей РК (июнь 2025) — это был инсайдер с авторизованным доступом, а не взлом
-периметра.** Файрвол, антивирус и DLP такое не ловят: запрос к базе выглядит «легально». Единственное,
-что выдаёт инсайдера, — **аномалия его собственного поведения**: выгрузка в десятки раз больше нормы,
-ночью, по таблице ПДн. Insider Guard построен ровно вокруг этого слепка.
-
-Контекст (IBM 2025): malicious insider — самый дорогой вектор ($4,92M), средний MTTD — 241 день.
-Мы сжимаем эти 241 день до секунд: движок считает норму сам и поднимает злоумышленника в топ очереди.
-
-## Ключевой тезис
-
-1. **UEBA с computed baseline (не хардкод).** Baseline каждого пользователя считается **из его
-   собственной истории** методом **leave-one-day-out** — аномальный день не раздувает свой же baseline.
-   Аномалия меряется относительно личной нормы И относительно коллег по роли (perRole median).
-2. **Объяснимость = доказательство.** SHAP-подобная аддитивная декомпозиция (Hamilton /
-   largest-remainder), где **сумма вкладов триггеров === score** математически точно. Glass-box,
-   а не чёрный ящик — воспроизводимо и пригодно для проверки человеком.
-3. **Attack-path / граф доступа.** DFS-поиск пути бокового перемещения через ≥3 хоста + привязка
-   триггеров к **MITRE ATT&CK** (T1021/T1048/T1074/T1078/T1098/T1213/T1530/T1566).
-4. **Честные метрики на дисбалансе.** НЕ accuracy (пустышка «всё чисто» даёт 99,9% accuracy и ловит
-   ноль), а **recall@top-N / AUPRC / precision** против наивного объёмного порога DLP.
-
----
-
-## Сервер / запуск
-
-Node + Express + pure-JS store. Движок считает baseline пользователя из его истории
-(leave-one-day-out) и скорит каждый user-day на **произвольном массиве событий любого размера** —
-это реальный UEBA, а не захардкоженный mockup. Премиальный тёмный UI отдаётся из `public/` и читает
-всё из API; вся логика детекта — на бэкенде.
-
-### Quickstart (локально — гарантированный deliverable)
-
-```bash
-npm install          # express, multer, csv-parse, nanoid и т.д.
-npm run seed         # генерит корпус 40 пользователей × 30 дней + размеченные инциденты + benign-контроли
-npm start            # http://localhost:3000
-```
-
 Открыть `http://localhost:3000`. Health: `http://localhost:3000/api/health`.
 
-Опционально:
+**Локальная модель для отчёта (опционально):** поставить [Ollama](https://ollama.com), затем
 ```bash
-npm run db:init          # создать стор + применить схему (идемпотентно), без данных
-npm run test:contract    # доказать, что каждый эндпоинт отдаёт документированную форму (сервер должен быть запущен)
+ollama pull qwen2.5:7b     # один раз; затем демон уже работает в фоне
 ```
+Если Ollama не запущена — черновик отчёта детерминированно падает в mock-шаблон, остальное работает.
 
-`npm run seed -- --keep` пропускает повторный seed, если seed-датасет уже есть (используется в deploy-командах).
-
-### Что генерит seed
-
-- ~12 300 нормальных событий по **40 пользователям** (analyst/support/clerk/junior/auditor/dba/admin
-  + 1 ETL service-аккаунт) за **30 дней**, детерминированно (seeded PRNG → воспроизводимо).
-- **Размеченные инсайдер-инциденты**, подложенные внутрь реального потока (чтобы baseline был
-  *посчитан*, а не объявлен): mass-exfil, боковое перемещение, эскалация привилегий, off-hours-всплеск,
-  staging-exfil, impossible-travel компрометация, broad scatter-gather, covert channel.
-- **benign hard-negatives** (ETL service ночные 90k чтений; аудитор плановой проверки) — размечены
-  `malicious=0`, чтобы precision был честным.
-
-На дефолтном пороге **55** на встроенном корпусе вкладка **Валидация** показывает **TP=7 · FP=0 ·
-FN=1 · TN=2**, **recall@top-8 = 100%**, **AUPRC = 1.000** (baseline = prevalence); наивный
-периметровый DLP на том же корпусе поднимает ложные тревоги (reduction% в метриках). Двигаешь порог —
-tradeoff честный. **На защите показываем именно вкладку Валидация** (клиентский расчёт), а не
-серверные `/api/metrics` (8/8). **Честная оговорка: на синтетике типологии сепарабельны (отсюда
-AUPRC=1.000), на реальном логе цифры будут ниже — методология (leave-one-day-out) та же.**
-
-### Формат ingest (CSV / JSON-lines / JSON-array)
-
-Канонический event:
-```
-{ user, role, resource, db, host, ip, geo, action, rows, ts, channel, label? }
-```
-- **Обязательно:** `user`, `action`, `ts` (+ `resource` для не-`LOGIN`).
-- `action` ∈ `LOGIN/SELECT/EXPORT/DOWNLOAD/GRANT/SUDO/ROLE_CHANGE/...`
-- `ts` принимает ISO (`2026-06-12T02:14:00`), `YYYY-MM-DD HH:MM`, только дату или epoch.
-- `rows` по умолчанию 0. Колонка `label`/`malicious` (1/0/true/false) — опциональный ground-truth.
-- Принимаются типовые алиасы заголовков (`timestamp`/`time`, `table`/`target`, `username`/`account`,
-  `src_ip`, `location`, …) → адаптер ~50 строк на новый источник (AD/Colvir/ЦФТ/СУБД-аудит/1С).
-
-CSV-пример:
-```csv
-user,role,resource,db,host,ip,geo,action,rows,ts,channel,label
-u1,analyst,DB-PERSONS,persons,WS1,10.0.0.1,Астана,SELECT,80000,2026-06-12T02:14:00,db,1
-```
-
-Готовый сэмпл для жюри (синтетика, 0 реальных ИИН): [`samples/insider-access-log.csv`](samples/insider-access-log.csv)
-— перетащить во фронт или прогнать через `/api/ingest`; baseline посчитается из этих данных, аномальный
-день (`aibek.analyst`) поднимется в топ очереди. Описание корпуса — [`samples/README.md`](samples/README.md).
-
-Upload:
+**On-prem за периметром (один образ Node + Ollama):**
 ```bash
-curl -X POST http://localhost:3000/api/ingest -F "file=@your-log.csv"
-# или JSON-телом:
-curl -X POST http://localhost:3000/api/ingest -H "content-type: application/json" \
-  -d '{"name":"my-log","events":[{"user":"u1","action":"SELECT","resource":"DB-A","rows":50000,"ts":"2026-05-20T02:00:00"}]}'
+docker build -t insider-guard .
+docker run -p 3000:3000 -v ig-models:/root/.ollama insider-guard
 ```
-Ответ несёт `durationMs` (runtime движка) и новый `datasetId` (авто-активируется).
 
-### API
-
-Полный контракт + примеры payload: [`docs/contract.md`](docs/contract.md) и [`docs/fixtures.json`](docs/fixtures.json).
+## 🔌 API
 
 | Method | Path | Назначение |
 | --- | --- | --- |
-| GET | `/api/health` | liveness `{ ok, db, version }` |
-| POST | `/api/ingest` | upload лога → запуск движка → новый датасет |
-| GET | `/api/datasets` | список датасетов (switcher) |
-| GET | `/api/dataset?id=` | активный датасет (hero/shape) |
-| POST | `/api/dataset/:id/activate` | переключить активный датасет |
-| GET | `/api/incidents?...` | очередь триажа (score desc) |
-| GET | `/api/incidents/:id` | полная деталь (граф + SHAP + baseline + playbook) |
-| POST | `/api/report/:id` | IR-отчёт (локальная модель Ollama `qwen2.5:7b`, без ключа; offline-fallback на mock) |
-| POST | `/api/report/draft` | черновик произвольного текста отчёта через локальный Ollama (используется in-browser демо) |
-| GET | `/api/metrics?threshold=` | confusion / precision / recall / AUPRC + naive-DLP |
+| `GET` | `/api/health` | liveness `{ ok, db, version }` |
+| `POST` | `/api/ingest` | upload лога → запуск движка → новый датасет |
+| `GET` | `/api/incidents` | очередь триажа (score desc) |
+| `GET` | `/api/incidents/:id` | деталь: граф + SHAP + baseline + playbook |
+| `POST` | `/api/report/:id` | IR-отчёт через локальную модель (Ollama), mock-fallback |
+| `POST` | `/api/report/draft` | прокси для in-browser демо → локальная Ollama |
+| `GET` | `/api/metrics?threshold=` | confusion / precision / recall / AUPRC + naive-DLP |
 
-### Движок (для аудируемости)
+Полный контракт + примеры payload — [`docs/contract.md`](docs/contract.md).
 
-`server/engine.js` — pure (без DB, без Express). Конвейер:
-1. группировка событий → per-user → per-user-day окна (единица дневного триажа SOC);
-2. baseline на пользователя из истории (**leave-one-day-out**; robust trimmed mean для объёма;
-   p5–p95 padded полоса рабочих часов; ресурсы, виденные ≥2 предыдущих дня = «known»;
-   habituation для выходных/off-hours; cold-start → fallback на role-median);
-3. батарея триггеров **относительно этого baseline** (VOLUME_ANOMALY/SOFT, LATERAL_MOVEMENT,
-   BROAD/SENSITIVE_ACCESS, BULK_EXFIL, OFF_HOURS_VELOCITY, PRIV_ESCALATION, COMPROMISE_INDICATORS,
-   STAGING_EXFIL, COVERT_CHANNEL) с mutual-exclusion, чтобы один всплеск не считался дважды;
-4. score `= round(100·(1−e^(−effRaw/38)))`, mitigation для established-аккаунтов только когда **все**
-   триггеры soft;
-5. Hamilton largest-remainder целочисленный SHAP (Σ === score);
-6. per-user-day подграф (nodes/edges + lateral-path) для attack-path SVG.
+## 🏅 Соответствие критериям трека (AI Shield)
 
-Точный конфиг (веса, VOLUME_MULT, окно baseline, пороги) снапшотится в `run_meta` на датасет.
+| # | Критерий | Чем закрыт |
+|---|---|---|
+| 1 | Актуальность / инновационность + обоснованность AI | якорь 16,3 млн · UEBA по личной норме · Σ SHAP === score |
+| 2 | AI-модель, независимая от иных сервисов | две свои unsupervised-модели на устройстве + локальная LLM для отчёта · **0 внешних API** |
+| 3 | Информационная безопасность + этика | OWASP/STRIDE · синтетика · privacy-by-design · human-in-the-loop · tamper-seal |
+| 4 | Практическая реализуемость + масштабируемость | живой MVP · 12-полевой контракт · ~50 строк адаптера на источник · on-prem Docker |
+| 5 | Качество презентации и техзащиты | отполированный UI · валидация (порог 55: TP=7/FP=0/FN=1/TN=2, recall@top-8 100%) |
 
-### Где LLM / AI
+Подробный разбор с пруфами (файл/эндпоинт/строка) — [`CRITERIA.md`](CRITERIA.md).
 
-IR-нарратив / investigation-отчёт генерит **локальная модель** — **Ollama, `qwen2.5:7b`** (7B,
-мультиязычная, вкл. русский), запущенная on-prem на `127.0.0.1:11434` (эндпоинт и модель
-переопределяются через `OLLAMA_URL` / `OLLAMA_MODEL`). **Ни ключа, ни внешнего/облачного API-вызова
-нигде в продукте нет**: браузер никогда не обращается к модели напрямую — Node-сервер проксирует
-запрос к локальному демону Ollama (маршруты `POST /api/report/:id` и `POST /api/report/draft`).
-LLM **никогда не считает score/вердикт** (anti-pattern «LLM as source of truth» исключён
-архитектурно) — пишет только текст отчёта. Если локальный Ollama недоступен (например, на
-эфемерном Vercel-демо, где его нет), черновик генерится **детерминированным mock-шаблоном**
-(`report.js mockReport`, работает оффлайн) — демо никогда не падает. **Ноль внешних API во всём
-продукте:** все модели (детект-модели + отчётный LLM) локальны.
+## 📚 Документация
 
-**Чтобы получить реальный локальный нарратив локально:**
-```bash
-ollama pull qwen2.5:7b   # один раз — скачать модель
-ollama serve             # поднять локальный демон (или он уже запущен)
-npm start                # сервер проксирует /api/report/* к 127.0.0.1:11434
-```
-Если Ollama не установлен/не запущен — отчёт автоматически откатывается на детерминированный mock.
+- [`SUBMISSION.md`](SUBMISSION.md) — одностраничник для жюри
+- [`CRITERIA.md`](CRITERIA.md) — соответствие 5 официальным критериям
+- [`docs/contract.md`](docs/contract.md) — контракт API + формат ingest
+- [`SECURITY.md`](SECURITY.md) — threat-model (OWASP/STRIDE)
+- [`DEMO-SCRIPT.md`](DEMO-SCRIPT.md) — поминутный сценарий защиты
 
-### Persistence
+## ⚖️ Честные ограничения
 
-Слой данных — **pure-JS store** (`server/store.js`), без нативных модулей и SQLite. Состояние
-(датасеты / инциденты / clean-user-days / active flag) живёт в RAM и **снапшотится в один JSON-файл**,
-чтобы переживать рестарты на долгоживущем хосте с примонтированным volume.
+- Источник вердикта — **детерминированные UEBA-эвристики** (не обученный XGBoost/autoencoder): осознанный выбор под imbalance 10⁻⁶ и аудируемость. Рядом работают две настоящие unsupervised AI-модели.
+- Данные **синтетические**, подобраны так, чтобы каждая типология чисто срабатывала; benign-контроли добавлены специально против «детектора-перестраховщика». На синтетике типологии сепарабельны (отсюда AUPRC=1.000) — **на реальном логе цифры будут ниже, методология (leave-one-day-out) та же.**
+- «Фишинг» покрыт косвенно: детект ловит **пост-фишинговую компрометацию** учётки (impossible travel, новый гео/устройство + аномальный доступ), а не сами письма.
 
-- **`DB_PATH`** — путь к JSON-снапшоту. По умолчанию `./data/store.json` локально; на Railway —
-  `/data/store.json` (mounted volume).
-- **На старте:** если `DB_PATH` есть → состояние грузится из него; если нет → `bootstrap.js` генерит
-  детерминированный seed-корпус и первый save создаёт файл.
-- **На каждой мутации** (ingest, активация датасета) → снапшот переписывается **атомарно**
-  (temp-файл + `rename`), краш в середине записи не портит снапшот.
-- **Graceful degradation:** на read-only / ephemeral FS (Vercel) неудачная запись логируется один раз,
-  стор продолжает работать чисто in-memory — процесс не падает. Тот же код персистит на Railway и
-  работает эфемерно на Vercel.
+<div align="center">
 
-`PORT` читается из env с fallback `3000`; сервер биндит `0.0.0.0`.
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:16a34a,55:064e3b,100:020617&height=120&section=footer" width="100%" alt=""/>
 
-### Deploy
+<sub>AFM AI Hackathon 2026 · трек <b>AI Shield</b> · защита данных / антихакинг · Алматы, 24–25 июня · MIT License</sub>
 
-- **Railway (primary, персистентный):** долгоживущий Node-процесс + mounted volume. `railway.json`
-  пинит NIXPACKS, `startCommand: npm start`, healthcheck `/api/health`. `nixpacks.toml` / `.nvmrc` /
-  `engines` = Node 20. Первый boot: снапшота нет → seed → пишется `/data/store.json`; дальше каждый
-  рестарт грузит существующий снапшот.
-  ```bash
-  railway init
-  railway volume add --mount-path /data
-  railway variable set DB_PATH=/data/store.json
-  railway up
-  ```
-- **Render (fallback):** `render.yaml` монтирует диск `/data`; задать `DB_PATH=/data/store.json`.
-- **Fly.io (fallback):** `fly launch --now` (Dockerfile node:20-slim, `fly.toml` монтирует volume `/data`);
-  `fly secrets set DB_PATH=/data/store.json`.
-- **Heroku-style:** `Procfile` (`web: npm start`). FS эфемерный → без диска стор in-memory (re-seed на boot).
-- **Vercel (поддерживается, эфемерно):** `api/index.js` экспортит Express-app напрямую; `vercel.json`
-  рерайтит `/api/*`. Serverless FS не writable → стор in-memory, seed детерминированно на первом запросе.
-  На Vercel нет локального Ollama → IR-отчёт там отдаёт **детерминированный mock-шаблон** (offline-
-  fallback); реальный локальный нарратив доступен при запуске с поднятым Ollama (см. «Где LLM / AI»).
-
-**Если CLI/auth недоступны**, локальный запуск выше полностью функционален с реальным движком +
-seeded-корпусом — это гарантированный deliverable.
-
----
-
-## Маппинг на критерии жюри
-
-ТЗ трека дословно: **«практичность, скорость обнаружения, объяснимость решений»** + риск-оценка/приоритизация.
-
-- **Практичность** → готовая очередь инцидентов для SOC + черновик IR-отчёта (экономит ручную работу);
-  привязка к реальной боли АФМ/гос-органов РК (утечка 16,3 млн = инсайдер, а не взлом).
-- **Скорость обнаружения** → детект в реальном времени по потоку access-логов, мгновенный risk-score;
-  241 день MTTD → секунды.
-- **Объяснимость** → SHAP-подобная декомпозиция «почему помечено» относительно baseline + граф доступа
-  + MITRE-привязка + RU-нарратив IR-отчёта. Центр продукта.
-- **Приоритизация** → P1–P4, очередь по score, recall@top-N.
-- **Язык метрик** (важно сказать жюри): **НЕ accuracy** — инсайдер-события редкие, классификатор-пустышка
-  даёт ~99,9% accuracy и ловит ноль. Показываем **AUPRC** (ранжирование) + **recall@top-N** (реальные
-  инциденты в топе) + **снижение ложных тревог** против наивного объёмного порога. benign-контроли
-  (ETL, плановый аудит) остаются ниже порога — доказывают precision. Ползунок порога (what-if) пересчитывает
-  confusion-matrix вживую.
-
-> **Метрики говорить как «7 из 8 типологий в топ при 0 FP / benign не помечены»**, а НЕ «8/8 атак».
-> Числа — из вкладки **Валидация** (порог 55: TP=7/FP=0/FN=1/TN=2, recall@top-8 100%, AUPRC 1.000
-> при baseline=prevalence), а не серверные `/api/metrics`. На реальном логе цифры ниже — методология та же.
-
-## Привязка к РК / ПДн
-
-- **Кейс:** по заключению МЦРИАП и КНБ — **не взлом, а авторизованный доступ** (инсайдер ЛИБО
-  скомпрометированные креды). Движок ловит ОБА вектора: insider-типологии + `COMPROMISE_INDICATORS`.
-  Никогда не утверждать «доказанный инсайдер».
-- **On-prem / суверенитет:** Закон №94-V (локализация ПДн РК, в силе с 08.01.2025) — данные не покидают
-  периметр. On-prem — не «фича», а причина, по которой SaaS-UEBA гос-заказчику структурно непродаваем.
-  **Облачный live-деплой существует только для удобства жюри** (открыть по ссылке без установки);
-  целевая поставка — **on-prem за периметром**, `Dockerfile` (node:20-slim) уже есть →
-  `docker build && docker run` поднимает тот же продукт внутри сети. Облако и on-prem — один код.
-- **Масштаб-roadmap (потолок MVP → продакшн):** сейчас весь корпус считается in-memory одним проходом
-  (десятки тысяч событий — удобно для демо и аудита). Рост без переписывания ядра: (1) **батч/стрим-
-  инжест** (Kafka/tail вместо разового CSV); (2) **инкрементальный baseline** (скользящие median/MAD
-  на пользователя, O(1) на событие); (3) **Isolation Forest на сервере** (вынести лес из браузера в
-  Node-воркер, периодическое переобучение на свежем корпусе). Движок — pure-функции, каждый шаг —
-  обвязка вокруг существующего ядра.
-- **Privacy-by-design:** только синтетика на экране (ноль реальных ИИН), псевдонимизация, per-user
-  baseline (anti-bias), human-in-the-loop — система приоритизирует, решает человек (EU AI Act Art.14).
-
-## Честные ограничения
-
-- **Скоринг-движок** (Σ===score, источник вердикта) — **детерминированные UEBA-эвристики +
-  взвешенный scoring**, а не обученный XGBoost/autoencoder: осознанный выбор под imbalance 10⁻⁶ и
-  аудируемость (детерминизм = источник вердикта не галлюцинирует). **Рядом** с ним работают две
-  независимые unsupervised AI-модели (robust-MAD + **полноценный Isolation Forest**, Liu/Ting/Zhou
-  2008, чистый JS, обучен на ~980 синтетических фоновых user-day из `ROLE_NORMS` методом novelty
-  detection — инциденты скорятся против обученной нормы, а не обучают лес; виден в UI) как отдельные
-  anomaly-сигналы, НЕ входящие в Σ score. То есть IF — **реализован и работает**, а не «заготовка за флагом».
-- SHAP здесь — **точная аддитивная декомпозиция** весов триггеров (Hamilton/largest-remainder),
-  Σ===score бит-в-бит, а не вызов библиотеки `shap`. Семантика та же (вклад фактора в решение).
-- Веса экспертно-калиброваны (не обучены) и снапшотятся в `run_meta` для воспроизводимости.
-- Данные синтетические, подобраны так, чтобы каждая типология чисто срабатывала; benign-контроли
-  добавлены специально против «детектора-перестраховщика».
-- LLM-нарратив генерит **локальная модель** (Ollama, `qwen2.5:7b`) on-prem — без ключа и без внешних
-  сервисов; при недоступном Ollama — детерминированный mock-шаблон (offline-fallback). Ноль внешних API.
-
-> Историческая эволюция прототипа (AML → prescrubber → insider, один движок) сохранена в
-> [`archive/`](archive/) как пруф pivot velocity.
+</div>
