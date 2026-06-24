@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Insider Guard — Live · мониторинг БД в реальном времени</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:#020617;color:#F4F4F6;font-family:Inter,sans-serif;
+    background-image:repeating-linear-gradient(0deg,rgba(255,255,255,.02) 0 1px,transparent 1px 64px),repeating-linear-gradient(90deg,rgba(255,255,255,.02) 0 1px,transparent 1px 64px);min-height:100vh;padding:28px 32px}
+  .mono{font-family:'JetBrains Mono',monospace}
+  .wrap{max-width:1100px;margin:0 auto}
+  .topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .brand{font-family:'JetBrains Mono',monospace;font-weight:800;letter-spacing:.12em;font-size:20px}
+  .tag{font-family:'JetBrains Mono',monospace;font-size:12px;letter-spacing:.16em;color:#59D499;border:1px solid rgba(89,212,153,.4);padding:4px 10px;border-radius:4px;background:rgba(6,78,59,.35)}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .pulse{animation:pl 1.3s ease-in-out infinite} @keyframes pl{0%,100%{opacity:1}50%{opacity:.25}}
+  .panel{border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(255,255,255,.012);padding:18px 20px;margin-top:18px}
+  .kv{display:flex;gap:26px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:13px;color:#8A8B8C}
+  .kv b{color:#F4F4F6;font-weight:700}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  button{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px;letter-spacing:.04em;border-radius:8px;padding:11px 18px;cursor:pointer;border:1px solid transparent}
+  .b-green{background:#16a34a;color:#04130b} .b-red{background:#FF6161;color:#1a0606}
+  .b-amber{background:#FFC533;color:#1a1304} .b-ghost{background:#0e1626;color:#C9CACC;border:1px solid rgba(255,255,255,.14)}
+  button:hover{filter:brightness(1.1)}
+  h3{font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:.16em;color:#16a34a;margin:0 0 12px}
+  .feed{display:flex;flex-direction:column;gap:10px}
+  .inc{display:flex;align-items:center;gap:16px;padding:14px 16px;border:1px solid rgba(255,255,255,.1);border-radius:9px;background:rgba(255,255,255,.015)}
+  .inc.fresh{animation:fresh 2.4s ease-out;border-color:rgba(255,97,97,.6)}
+  @keyframes fresh{0%{box-shadow:0 0 0 0 rgba(255,97,97,.7);background:rgba(255,97,97,.12)}100%{box-shadow:0 0 0 0 rgba(255,97,97,0)}}
+  .score{font-family:'JetBrains Mono',monospace;font-weight:800;font-size:30px;min-width:62px;text-align:center}
+  .pill{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:11px;padding:3px 9px;border-radius:4px}
+  .new{font-family:'JetBrains Mono',monospace;font-weight:800;font-size:10px;letter-spacing:.1em;color:#FF6161;border:1px solid rgba(255,97,97,.6);padding:2px 7px;border-radius:4px;background:rgba(255,97,97,.08)}
+  .log{font-family:'JetBrains Mono',monospace;font-size:12px;color:#8A8B8C;max-height:150px;overflow:auto;line-height:1.7}
+  .muted{color:#6A6B6C;font-size:12px;font-family:'JetBrains Mono',monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <span class="brand">INSIDER&nbsp;GUARD</span>
+    <span class="tag">LIVE · DB MONITOR</span>
+    <span style="margin-left:auto" class="muted">синтетика · 0 реальных ИИН · AFM AI Hackathon 2026</span>
+  </div>
+
+  <div class="panel">
+    <div class="kv">
+      <span><span id="conn-dot" class="dot pulse" style="background:#6A6B6C"></span>&nbsp; <b id="conn">не подключено</b></span>
+      <span>БД: <b id="dbfile" class="mono">—</b></span>
+      <span>событий: <b id="events">0</b></span>
+      <span>инцидентов: <b id="incs">0</b></span>
+      <span>опросов: <b id="polls">0</b></span>
+      <span>интервал: <b id="interval">—</b></span>
+      <span>офлайн: <b id="offline" style="color:#59D499">да</b></span>
+    </div>
+    <div class="controls">
+      <button class="b-green" onclick="start()">▶ Запустить мониторинг</button>
+      <button class="b-amber" onclick="inject()">💉 Инъекция инсайдер-атаки</button>
+      <button class="b-ghost" onclick="stop()">⏹ Стоп</button>
+      <button class="b-ghost" onclick="reset()">⟲ Сброс</button>
+    </div>
+    <div class="muted" style="margin-top:10px">Подключаемся к локальной SQL-БД (SQLite, node:sqlite — без сети, без зависимостей). Новые события из БД подхватываются опросом и прогоняются движком в реальном времени. «Инъекция» вставляет атаку в БД — и она появляется в очереди сама.</div>
+  </div>
+
+  <div class="panel">
+    <h3>// ЖИВАЯ ОЧЕРЕДЬ ТРИАЖА · из БД</h3>
+    <div id="feed" class="feed"><div class="muted">Нажми «Запустить мониторинг» —</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>// ПОТОК СОБЫТИЙ</h3>
+    <div id="log" class="log"></div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let datasetId = null, seen = new Set(), timer = null, started = false;
+
+function log(msg){ const el=document.getElementById('log'); const t=new Date().toLocaleTimeString('ru-RU');
+  el.innerHTML = `<div>[${t}] ${msg}</div>` + el.innerHTML; }
+function prio(s){ if(s>=80)return['P1','#FF6161','rgba(255,97,97,.12)']; if(s>=55)return['P2','#FFC533','rgba(255,197,51,.12)'];
+  if(s>=30)return['P3','#FFC533','rgba(255,197,51,.08)']; return['P4','#59D499','rgba(6,78,59,.3)']; }
+
+async function jpost(p,b){ const r=await fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); return r.json(); }
+async function jget(p){ const r=await fetch(API+p); return r.json(); }
+
+async function start(){
+  log('подключение к БД + запуск детекта…');
+  const s = await jpost('/api/watch/start',{});
+  datasetId = s.datasetId; started = true;
+  log(`✓ подключено: ${s.eventCount} событий, ${s.incidentCount} инцидентов`);
+  if(!timer) timer = setInterval(tick, 2000);
+  tick();
+}
+async function stop(){ const s=await jpost('/api/watch/stop',{}); started=false; if(timer){clearInterval(timer);timer=null;}
+  document.getElementById('conn').textContent='остановлено'; document.getElementById('conn-dot').style.background='#FFC533';
+  log('⏹ мониторинг остановлен'); }
+async function reset(){ seen=new Set(); document.getElementById('feed').innerHTML=''; log('⟲ сброс БД + пересев фона…');
+  const s=await jpost('/api/watch/reset',{}); datasetId=s.datasetId; started=true; log(`✓ пересеяно: ${s.eventCount} событий`); tick(); }
+async function inject(){ const r=await jpost('/api/watch/inject',{});
+  log(`💉 инъекция: пользователь ${r.injected.actor}, ${r.injected.events} событий ночной массовой выгрузки → ждём опрос…`); }
+
+async function tick(){
+  try{
+    const s = await jget('/api/watch/status');
+    document.getElementById('conn').textContent = s.watching ? 'ПОДКЛЮЧЕНО К БД · REAL-TIME' : 'не активно';
+    document.getElementById('conn-dot').style.background = s.watching ? '#16a34a' : '#6A6B6C';
+    document.getElementById('dbfile').textContent = (s.dbFile||'—').split('/').slice(-2).join('/');
+    document.getElementById('events').textContent = s.eventCount;
+    document.getElementById('incs').textContent = s.incidentCount;
+    document.getElementById('polls').textContent = s.polls;
+    document.getElementById('interval').textContent = (s.intervalMs/1000)+'s';
+    if(datasetId){
+      const q = await jget('/api/incidents?datasetId='+encodeURIComponent(datasetId)+'&limit=12');
+      const inc = q.incidents || (Array.isArray(q)?q:[]);
+      renderFeed(inc);
+    }
+  }catch(e){ /* offline-safe */ }
+}
+
+function renderFeed(inc){
+  const feed = document.getElementById('feed');
+  if(!inc.length){ feed.innerHTML='<div class="muted">нет инцидентов</div>'; return; }
+  feed.innerHTML='';
+  for(const i of inc){
+    // content key (stable across re-sorts; positional _id shifts when a new incident jumps in)
+    const id = (i.user||'')+'|'+i.score+'|'+(i.title||'');
+    const isNew = started && !seen.has(id) && seen.size>0;
+    const [pc,pcol,pbg]=prio(i.score);
+    const d=document.createElement('div'); d.className='inc'+(isNew?' fresh':'');
+    d.innerHTML=`<div class="score" style="color:${pcol}">${i.score}</div>
+      <div style="flex:1">
+        <div style="font-size:15px;color:#F4F4F6">${(i.title||'инцидент')}</div>
+        <div class="muted" style="margin-top:3px">${i.user||''} ${i._seq?('· '+i._seq):''}</div>
+      </div>
+      <span class="pill" style="color:${pcol};background:${pbg}">${pc}</span>
+      ${isNew?'<span class="new">● NEW</span>':''}`;
+    feed.appendChild(d);
+    if(isNew) log(`🔴 НОВЫЙ инцидент: ${i.user} · score ${i.score} · ${(i.title||'').slice(0,40)}`);
+    seen.add(id);
+  }
+  // seed the seen-set on first render so we don't flash everything as NEW
+  if(seen.size && !window._primed){ window._primed=true; }
+}
+</script>
+</body>
+</html>

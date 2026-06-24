@@ -15,11 +15,13 @@ const { detect, ENGINE_VERSION } = require('./engine');
  * @param {Object} args { name, source, events, hasGroundTruth, activate }
  * @returns summary object (datasetId, counts, summary, durationMs, incidentCount)
  */
-async function persistDataset({ name, source, events, hasGroundTruth, activate = true }) {
+async function persistDataset({ name, source, events, hasGroundTruth, activate = true, datasetId: fixedId }) {
   const result = detect(events, {});
   const { incidents, cleanUserDays, meta } = result;
 
-  const datasetId = 'ds_' + nanoid(10);
+  // fixedId lets a live source (watcher) update ONE dataset in place across polls
+  // (same id -> putDataset overwrites), instead of accreting a new dataset each tick.
+  const datasetId = fixedId || ('ds_' + nanoid(10));
   const nowIso = new Date().toISOString();
 
   // 2nd pass: data-driven cross-links. A host/ip appearing in >=2 incidents,

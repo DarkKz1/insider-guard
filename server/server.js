@@ -15,6 +15,7 @@ const incidentsRoutes = require('./routes/incidents.routes');
 const reportRoutes = require('./routes/report.routes');
 const metricsRoutes = require('./routes/metrics.routes');
 const datasetRoutes = require('./routes/dataset.routes');
+const watchRoutes = require('./routes/watch.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -131,6 +132,7 @@ app.use('/api', incidentsRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', metricsRoutes);
 app.use('/api', datasetRoutes);
+app.use('/api', watchRoutes);
 
 // --- static front (served from public/) ---
 const publicDir = path.join(__dirname, '..', 'public');
