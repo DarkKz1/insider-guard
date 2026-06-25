@@ -33,6 +33,15 @@ router.post('/watch/inject', async (req, res) => {
   }
 });
 
+router.post('/watch/scenario', async (req, res) => {
+  try {
+    const r = await watcher.injectScenario();
+    res.json({ ok: true, ...r, note: '5 атак влетят в очередь по очереди в реальном времени' });
+  } catch (e) {
+    res.status(500).json({ error: 'scenario failed', detail: e.message });
+  }
+});
+
 router.post('/watch/reset', async (req, res) => {
   try {
     await source.init();

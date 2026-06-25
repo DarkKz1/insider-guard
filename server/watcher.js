@@ -91,33 +91,79 @@ function stop() {
   return status();
 }
 
-// INJECT a fresh insider-attack burst into the DB against a real background user
-// (so it deviates from THEIR baseline). Next poll picks it up → incident appears
-// live. This is the on-stage "watch it get caught in real-time" trigger.
-async function inject() {
-  const users = await source.sampleUsers(30);
-  const actor = users.length ? users[(state.newEventsTotal + state.polls) % users.length] : 'U-LIVE-1';
-  const base = new Date((await source.maxDay()) + 'T00:00:00');
-  base.setDate(base.getDate() + 1);
-  const day = base.toISOString().slice(0, 10);
+// attack-event factory: 5 distinct insider typologies. Each deviates from a real
+// background user's baseline, so the engine flags it on the next poll.
+function attackEvents(actor, day, kind) {
   const at = (h, m = 0) => `${day}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
-
-  const ev = [];
-  const push = (o) => ev.push({
+  const E = [];
+  const P = (o) => E.push({
     user: actor, role: o.role || 'support', resource: o.resource || null, db: o.db || 'db',
     host: o.host || null, ip: o.ip || '10.0.0.66', geo: o.geo || 'Астана', action: o.action,
     rows: o.rows || 0, ts: o.ts, channel: o.channel || null, from: o.from || null, to: o.to || null,
-    label_malicious: 1, label_typology: o.typ || null,
+    label_malicious: 1, label_typology: o.typ || kind,
   });
+  if (kind === 'mass_exfil') {
+    P({ action: 'LOGIN', host: 'H-DB-1', ts: at(2, 9), from: '-', to: 'H-DB-1' });
+    P({ action: 'SELECT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 1500, ts: at(2, 12) });
+    P({ action: 'EXPORT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 84000, ts: at(2, 18) });
+  } else if (kind === 'lateral') {
+    P({ action: 'LOGIN', host: 'H-WS-1', ts: at(1, 3), from: '-', to: 'H-WS-1' });
+    P({ action: 'LOGIN', host: 'H-JUMP-1', ts: at(1, 6), from: 'H-WS-1', to: 'H-JUMP-1' });
+    P({ action: 'LOGIN', host: 'H-APP-7', ts: at(1, 9), from: 'H-JUMP-1', to: 'H-APP-7' });
+    P({ action: 'LOGIN', host: 'H-DB-1', ts: at(1, 12), from: 'H-APP-7', to: 'H-DB-1' });
+    P({ action: 'SELECT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 2200, ts: at(1, 15) });
+  } else if (kind === 'compromise') {
+    // impossible travel: same user, Астана → Москва in 7 min, then exfil
+    P({ action: 'LOGIN', host: 'H-WS-1', ts: at(11, 2), geo: 'Астана', ip: '2.72.1.10', from: '-', to: 'H-WS-1' });
+    P({ action: 'LOGIN', host: 'H-WS-1', ts: at(11, 9), geo: 'Москва', ip: '95.31.4.5', from: '-', to: 'H-WS-1' });
+    P({ action: 'EXPORT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 30000, ts: at(11, 16), geo: 'Москва', ip: '95.31.4.5' });
+  } else if (kind === 'broad') {
+    ['DB-CARDS', 'DB-LOANS', 'DB-KYC', 'DB-SALARY', 'DB-PERSONS', 'DB-TX', 'DB-SCORING', 'DB-AML', 'DB-VIP', 'DB-AUDIT', 'DB-REF', 'DB-HR']
+      .forEach((r, i) => P({ action: 'SELECT', resource: r, host: 'H-DB-1', rows: 400 + i * 30, ts: at(3, i) }));
+  } else { // offhours spike
+    P({ action: 'LOGIN', host: 'H-WS-1', ts: at(3, 30), from: '-', to: 'H-WS-1' });
+    for (let i = 0; i < 8; i++) P({ action: 'SELECT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 1200, ts: at(3, 32 + i) });
+  }
+  return E;
+}
 
-  push({ action: 'LOGIN', host: 'H-WS-1', ts: at(2, 3), from: '-', to: 'H-WS-1', typ: 'lateral' });
-  push({ action: 'LOGIN', host: 'H-JUMP-1', ts: at(2, 6), from: 'H-WS-1', to: 'H-JUMP-1', typ: 'lateral' });
-  push({ action: 'LOGIN', host: 'H-DB-1', ts: at(2, 9), from: 'H-JUMP-1', to: 'H-DB-1', typ: 'lateral' });
-  push({ action: 'SELECT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 1500, ts: at(2, 12), typ: 'mass_exfil' });
-  push({ action: 'EXPORT', resource: 'DB-PERSONS', host: 'H-DB-1', rows: 84000, ts: at(2, 18), typ: 'mass_exfil' });
+async function attackDay() {
+  const base = new Date((await source.maxDay()) + 'T00:00:00');
+  base.setDate(base.getDate() + 1);
+  return base.toISOString().slice(0, 10);
+}
 
+// INJECT one fresh insider-attack burst → next poll picks it up → incident live.
+async function inject() {
+  const users = await source.sampleUsers(40);
+  const actor = users.length ? users[(state.newEventsTotal + state.polls) % users.length] : 'U-LIVE-1';
+  const day = await attackDay();
+  const ev = attackEvents(actor, day, 'mass_exfil');
   await source.insertEvents(ev);
-  return { actor, day, events: ev.length };
+  return { actor, day, kind: 'mass_exfil', events: ev.length };
+}
+
+// SCENARIO: fire 5 DISTINCT attacks staggered over time → the live queue fills
+// with threats one after another = a breathing SOC under attack (the wow moment).
+let _scenarioRunning = false;
+async function injectScenario() {
+  if (_scenarioRunning) return { alreadyRunning: true };
+  _scenarioRunning = true;
+  const users = await source.sampleUsers(40);
+  const day = await attackDay();
+  const kinds = ['mass_exfil', 'lateral', 'compromise', 'broad', 'offhours'];
+  let i = 0;
+  const fire = async () => {
+    try {
+      const actor = users[(i * 7) % Math.max(1, users.length)] || ('U-LIVE-' + i);
+      await source.insertEvents(attackEvents(actor, day, kinds[i]));
+    } catch (e) { /* keep the storm going */ }
+    i++;
+    if (i < kinds.length) { const t = setTimeout(() => { fire().catch(() => {}); }, 3500); if (t.unref) t.unref(); }
+    else _scenarioRunning = false;
+  };
+  await fire();
+  return { scenario: kinds, count: kinds.length, started: true };
 }
 
 function status() {
@@ -138,4 +184,4 @@ function status() {
   };
 }
 
-module.exports = { start, stop, poll, inject, status, rebuild, ensureSeeded, LIVE_ID };
+module.exports = { start, stop, poll, inject, injectScenario, status, rebuild, ensureSeeded, LIVE_ID };

@@ -54,11 +54,13 @@
       <span>инцидентов: <b id="incs">0</b></span>
       <span>опросов: <b id="polls">0</b></span>
       <span>интервал: <b id="interval">—</b></span>
+      <span>🔴 поймано угроз: <b id="caught" style="color:#FF6161">0</b></span>
       <span>офлайн: <b id="offline" style="color:#59D499">да</b></span>
     </div>
     <div class="controls">
       <button class="b-green" onclick="start()">▶ Запустить мониторинг</button>
-      <button class="b-amber" onclick="inject()">💉 Инъекция инсайдер-атаки</button>
+      <button class="b-red" onclick="scenario()">🌪 Демо-атака · 5 угроз</button>
+      <button class="b-amber" onclick="inject()">💉 Одна атака</button>
       <button class="b-ghost" onclick="stop()">⏹ Стоп</button>
       <button class="b-ghost" onclick="reset()">⟲ Сброс</button>
     </div>
@@ -103,6 +105,8 @@ async function reset(){ seen=new Set(); document.getElementById('feed').innerHTM
   const s=await jpost('/api/watch/reset',{}); datasetId=s.datasetId; started=true; log(`✓ пересеяно: ${s.eventCount} событий`); tick(); }
 async function inject(){ const r=await jpost('/api/watch/inject',{});
   log(`💉 инъекция: пользователь ${r.injected.actor}, ${r.injected.events} событий ночной массовой выгрузки → ждём опрос…`); }
+async function scenario(){ await jpost('/api/watch/scenario',{});
+  log('🌪 ДЕМО-АТАКА: масс-выгрузка → боковое перемещение → impossible-travel → широкий доступ → ночной всплеск. Влетают по очереди…'); }
 
 async function tick(){
   try{
@@ -143,7 +147,9 @@ function renderFeed(inc){
     if(isNew) log(`🔴 НОВЫЙ инцидент: ${i.user} · score ${i.score} · ${(i.title||'').slice(0,40)}`);
     seen.add(id);
   }
-  // seed the seen-set on first render so we don't flash everything as NEW
+  // counter: serious threats (P1/P2) currently surfaced
+  const caught = inc.filter(i => i.score >= 55).length;
+  document.getElementById('caught').textContent = caught;
   if(seen.size && !window._primed){ window._primed=true; }
 }
 </script>

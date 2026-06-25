@@ -57,13 +57,17 @@ app.use((req, res, next) => {
 // exempt so an orchestrator (Railway/Render/Vercel) can poll freely. Preflight
 // OPTIONS is already short-circuited by CORS above, so it never reaches here.
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
-const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX) || 100;
+// 2000/15min: still bounds abuse (~133 req/min) but does NOT throttle an
+// interactive demo — the live monitor polls every 2s and judges click around.
+// 100 was too low and 429'd the live feed mid-demo. Tune via env for prod.
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX) || 2000;
 const apiLimiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: RATE_LIMIT_MAX,
   standardHeaders: true, // emit RateLimit-* headers
   legacyHeaders: false,
-  skip: (req) => req.path === '/health' || req.path === '/api/health',
+  // exempt liveness + the local real-time monitor's high-frequency polling
+  skip: (req) => req.path.endsWith('/health') || req.path.includes('/watch'),
   message: { error: 'слишком много запросов', detail: 'превышен лимит запросов — повторите позже' },
 });
 app.use('/api', apiLimiter);
