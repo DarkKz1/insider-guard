@@ -11,9 +11,26 @@ const source = require('../source');
 
 const router = express.Router();
 
+// Live needs a long-lived host (background poll timer + writable on-disk DB). On
+// serverless (Vercel) it can't run — answer with a clean, self-describing JSON
+// instead of a raw 500 so /live.html degrades to a banner. status() stays
+// ungated: the client polls it to LEARN that Live is unavailable.
+function ensureLive(res) {
+  const s = watcher.status();
+  if (s.supported) return true;
+  res.json({
+    ok: false,
+    supported: false,
+    reason: s.unsupportedReason,
+    note: 'Live-мониторинг доступен только на долгоживущем хосте (on-prem / Railway / localhost). На serverless (Vercel) фоновый опрос не выполняется, а ФС только на чтение.',
+  });
+  return false;
+}
+
 router.get('/watch/status', (req, res) => res.json(watcher.status()));
 
 router.post('/watch/start', async (req, res) => {
+  if (!ensureLive(res)) return;
   try {
     const s = await watcher.start({ intervalMs: req.body && req.body.intervalMs });
     res.json({ ok: true, ...s });
@@ -25,6 +42,7 @@ router.post('/watch/start', async (req, res) => {
 router.post('/watch/stop', (req, res) => res.json({ ok: true, ...watcher.stop() }));
 
 router.post('/watch/inject', async (req, res) => {
+  if (!ensureLive(res)) return;
   try {
     const injected = await watcher.inject();
     res.json({ ok: true, injected, note: 'появится в очереди при следующем опросе БД' });
@@ -34,6 +52,7 @@ router.post('/watch/inject', async (req, res) => {
 });
 
 router.post('/watch/scenario', async (req, res) => {
+  if (!ensureLive(res)) return;
   try {
     const r = await watcher.injectScenario();
     res.json({ ok: true, ...r, note: '5 атак влетят в очередь по очереди в реальном времени' });
@@ -43,6 +62,7 @@ router.post('/watch/scenario', async (req, res) => {
 });
 
 router.post('/watch/reset', async (req, res) => {
+  if (!ensureLive(res)) return;
   try {
     await source.init();
     await source.clear();

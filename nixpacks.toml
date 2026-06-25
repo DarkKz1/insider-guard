@@ -1,6 +1,6 @@
 # Pure-JS store (no native modules) — only Node is needed at build time.
 [phases.setup]
-nixPkgs = ["nodejs_20"]
+nixPkgs = ["nodejs_22"]
 
 [phases.install]
 cmds = ["npm ci || npm install"]

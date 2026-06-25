@@ -2,7 +2,10 @@
 # container. The detection engine has no native deps; Ollama is bundled ONLY to
 # draft the IR-report narrative on-prem (no external API, no key). Used by
 # Railway (primary) and any Docker host (Fly.io, etc.).
-FROM node:20-slim
+#
+# Node 22 LTS (not 20): the real-time Live monitor (server/db-source.js) uses the
+# built-in `node:sqlite`, which ships only on Node >=22.5. Node 20 is also EOL.
+FROM node:22-slim
 
 # curl/ca-certs to fetch the Ollama installer; zstd to extract it (the installer
 # now ships a zstd-compressed bundle); tini for clean PID-1 signal handling.

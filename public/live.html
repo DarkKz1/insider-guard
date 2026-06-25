@@ -26,6 +26,10 @@
   .b-green{background:#16a34a;color:#04130b} .b-red{background:#FF6161;color:#1a0606}
   .b-amber{background:#FFC533;color:#1a1304} .b-ghost{background:#0e1626;color:#C9CACC;border:1px solid rgba(255,255,255,.14)}
   button:hover{filter:brightness(1.1)}
+  button:disabled{opacity:.32;cursor:not-allowed;filter:none}
+  .banner{border:1px solid rgba(255,197,51,.5);background:rgba(255,197,51,.06);border-radius:12px;padding:18px 20px;margin-top:18px;display:flex;gap:13px;align-items:flex-start}
+  .banner .bt{font-family:'JetBrains Mono',monospace;font-weight:700;color:#FFC533;letter-spacing:.06em;margin-bottom:7px}
+  .banner a{color:#59D499}
   h3{font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:.16em;color:#16a34a;margin:0 0 12px}
   .feed{display:flex;flex-direction:column;gap:10px}
   .inc{display:flex;align-items:center;gap:16px;padding:14px 16px;border:1px solid rgba(255,255,255,.1);border-radius:9px;background:rgba(255,255,255,.015)}
@@ -44,6 +48,20 @@
     <span class="brand">INSIDER&nbsp;GUARD</span>
     <span class="tag">LIVE · DB MONITOR</span>
     <span style="margin-left:auto" class="muted">синтетика · 0 реальных ИИН · AFM AI Hackathon 2026</span>
+  </div>
+
+  <div id="banner" class="banner" style="display:none">
+    <span style="font-size:20px;line-height:1">⚠️</span>
+    <div>
+      <div class="bt">LIVE-РЕЖИМ НЕДОСТУПЕН НА ЭТОМ ХОСТЕ</div>
+      <div class="muted" style="color:#C9CACC;line-height:1.75">
+        Реальный мониторинг БД требует <b style="color:#F4F4F6">долгоживущего процесса</b> (фоновый опрос каждые 2 с) и записи на диск.
+        На <b style="color:#F4F4F6">serverless (Vercel)</b> функция замораживается между запросами, а файловая система — только на чтение, поэтому поток событий здесь не идёт.
+        <br>➡️ Открой Live на <b style="color:#59D499">on-prem / Railway-сборке</b>:
+        <a id="railway-link" href="https://insider-guard-demo-production.up.railway.app/live.html">railway&nbsp;…/live.html</a>.
+        <br>Остальной продукт (очередь, граф, SHAP, метрики, отчёт) на Vercel работает полностью — <a href="/">вернуться в дашборд ›</a>
+      </div>
+    </div>
   </div>
 
   <div class="panel">
@@ -80,7 +98,7 @@
 
 <script>
 const API = '';
-let datasetId = null, seen = new Set(), timer = null, started = false;
+let datasetId = null, seen = new Set(), timer = null, started = false, liveOK = true;
 
 function log(msg){ const el=document.getElementById('log'); const t=new Date().toLocaleTimeString('ru-RU');
   el.innerHTML = `<div>[${t}] ${msg}</div>` + el.innerHTML; }
@@ -90,22 +108,30 @@ function prio(s){ if(s>=80)return['P1','#FF6161','rgba(255,97,97,.12)']; if(s>=5
 async function jpost(p,b){ const r=await fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); return r.json(); }
 async function jget(p){ const r=await fetch(API+p); return r.json(); }
 
+// guard: on a host where Live can't run (serverless/Vercel) every action is a
+// no-op that just nudges the banner, instead of firing a doomed request.
+function notLive(){ log('⚠️ Live-режим недоступен на serverless (Vercel). Открой демо на Railway — ссылка в плашке выше.'); return false; }
+
 async function start(){
+  if(!liveOK) return notLive();
   log('подключение к БД + запуск детекта…');
   const s = await jpost('/api/watch/start',{});
+  if(s && s.supported === false){ markUnsupported(s.reason); return; }
   datasetId = s.datasetId; started = true;
   log(`✓ подключено: ${s.eventCount} событий, ${s.incidentCount} инцидентов`);
   if(!timer) timer = setInterval(tick, 2000);
   tick();
 }
-async function stop(){ const s=await jpost('/api/watch/stop',{}); started=false; if(timer){clearInterval(timer);timer=null;}
+async function stop(){ if(!liveOK) return notLive(); const s=await jpost('/api/watch/stop',{}); started=false; if(timer){clearInterval(timer);timer=null;}
   document.getElementById('conn').textContent='остановлено'; document.getElementById('conn-dot').style.background='#FFC533';
   log('⏹ мониторинг остановлен'); }
-async function reset(){ seen=new Set(); document.getElementById('feed').innerHTML=''; log('⟲ сброс БД + пересев фона…');
-  const s=await jpost('/api/watch/reset',{}); datasetId=s.datasetId; started=true; log(`✓ пересеяно: ${s.eventCount} событий`); tick(); }
-async function inject(){ const r=await jpost('/api/watch/inject',{});
+async function reset(){ if(!liveOK) return notLive(); seen=new Set(); document.getElementById('feed').innerHTML=''; log('⟲ сброс БД + пересев фона…');
+  const s=await jpost('/api/watch/reset',{}); if(s && s.supported===false){ markUnsupported(s.reason); return; } datasetId=s.datasetId; started=true; log(`✓ пересеяно: ${s.eventCount} событий`); tick(); }
+async function inject(){ if(!liveOK) return notLive(); const r=await jpost('/api/watch/inject',{});
+  if(r && r.supported===false){ markUnsupported(r.reason); return; }
   log(`💉 инъекция: пользователь ${r.injected.actor}, ${r.injected.events} событий ночной массовой выгрузки → ждём опрос…`); }
-async function scenario(){ await jpost('/api/watch/scenario',{});
+async function scenario(){ if(!liveOK) return notLive(); const r=await jpost('/api/watch/scenario',{});
+  if(r && r.supported===false){ markUnsupported(r.reason); return; }
   log('🌪 ДЕМО-АТАКА: масс-выгрузка → боковое перемещение → impossible-travel → широкий доступ → ночной всплеск. Влетают по очереди…'); }
 
 async function tick(){
@@ -152,6 +178,30 @@ function renderFeed(inc){
   document.getElementById('caught').textContent = caught;
   if(seen.size && !window._primed){ window._primed=true; }
 }
+
+// degrade the page when the host can't run Live (serverless/Vercel): reveal the
+// banner, disable the controls, and freeze the status line so nothing looks broken.
+function markUnsupported(reason){
+  liveOK = false;
+  if(timer){ clearInterval(timer); timer=null; }
+  document.getElementById('banner').style.display = 'flex';
+  document.querySelectorAll('.controls button').forEach(b => { b.disabled = true; });
+  document.getElementById('conn').textContent = 'недоступно на этом хосте';
+  document.getElementById('conn-dot').style.background = '#FFC533';
+  document.getElementById('offline').textContent = 'serverless';
+  document.getElementById('feed').innerHTML =
+    '<div class="muted">Live-поток здесь не запускается — открой демо на Railway (ссылка в плашке выше).</div>';
+}
+
+// on load: ask the server whether real-time Live is supported on THIS host.
+// status() always answers (it never touches the DB), so this works even on the
+// serverless build where the watcher itself can't run.
+(async function probe(){
+  try{
+    const s = await jget('/api/watch/status');
+    if(s && s.supported === false) markUnsupported(s.unsupportedReason);
+  }catch(e){ /* status unreachable → leave controls enabled; a click will surface the real error */ }
+})();
 </script>
 </body>
 </html>

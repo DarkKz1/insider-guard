@@ -166,7 +166,31 @@ async function injectScenario() {
   return { scenario: kinds, count: kinds.length, started: true };
 }
 
+// liveSupported — can REAL-TIME monitoring actually run on THIS host? Two hard
+// requirements that serverless cannot meet:
+//   • a long-lived process — the poll timer (setInterval) must keep firing.
+//     Serverless (Vercel/Lambda) FREEZES the function after each response, so a
+//     background timer never ticks → no stream.
+//   • a usable on-disk DB — the default SQLite driver needs node:sqlite (Node
+//     >=22.5); a serverless FS is read-only anyway. The pg/pglite driver works
+//     anywhere a long-lived host exists.
+// Returns { ok, reason } so /live.html can degrade gracefully (a clear banner)
+// instead of surfacing a raw 500.
+function liveSupported() {
+  if (process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION) {
+    return { ok: false, reason: 'serverless' };
+  }
+  if (process.env.DB_DRIVER === 'pg' || process.env.PG_URL) return { ok: true, reason: null };
+  try {
+    require('node:sqlite');
+    return { ok: true, reason: null };
+  } catch (e) {
+    return { ok: false, reason: 'node-sqlite-unavailable' };
+  }
+}
+
 function status() {
+  const sup = liveSupported();
   return {
     watching: state.watching,
     intervalMs: state.intervalMs,
@@ -181,7 +205,9 @@ function status() {
     startedAt: state.startedAt,
     lastPoll: state.lastPoll,
     offline: true,
+    supported: sup.ok,
+    unsupportedReason: sup.reason,
   };
 }
 
-module.exports = { start, stop, poll, inject, injectScenario, status, rebuild, ensureSeeded, LIVE_ID };
+module.exports = { start, stop, poll, inject, injectScenario, status, liveSupported, rebuild, ensureSeeded, LIVE_ID };
