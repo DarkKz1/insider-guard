@@ -2,7 +2,7 @@
 const express = require('express');
 const { resolveDataset, incidentDetail } = require('../queries');
 const { mockReport, ollamaReport, SOC_SYSTEM } = require('../report');
-const { ollamaChat, ollamaUp, OLLAMA_MODEL } = require('../lib/llm');
+const { ollamaChat, ollamaModelReady, OLLAMA_MODEL } = require('../lib/llm');
 
 const router = express.Router();
 
@@ -22,11 +22,12 @@ const MAX_PROMPT = 16000;
 router.post('/report/draft', async (req, res) => {
   const prompt = req.body && typeof req.body.prompt === 'string' ? req.body.prompt.slice(0, MAX_PROMPT) : '';
   if (!prompt.trim()) return res.status(400).json({ error: 'пустой prompt' });
-  // Fast-fail guard (serverless / no-Ollama): a quick 1.5s liveness probe so an
-  // unreachable daemon returns in <3s instead of hanging until the full chat
-  // timeout (and tripping the 30s Vercel function ceiling).
-  if (!(await ollamaUp())) {
-    return res.json({ mode: 'unavailable', detail: 'ollama недоступна (probe)' });
+  // Fast-fail guard (serverless / no-Ollama / model-not-pulled): a quick 1.5s
+  // probe of /api/tags so an unreachable daemon OR an absent model returns in
+  // <3s instead of attempting a generation that 404s ("model not found") or
+  // hanging until the full chat timeout (tripping the 30s Vercel ceiling).
+  if (!(await ollamaModelReady())) {
+    return res.json({ mode: 'unavailable', detail: `локальная модель ${OLLAMA_MODEL} не готова (демон недоступен или модель не скачана)` });
   }
   try {
     const text = await ollamaChat({ system: SOC_SYSTEM, user: prompt });
@@ -45,11 +46,11 @@ router.post('/report/:id', async (req, res) => {
   if (!d) return res.status(404).json({ error: 'нет датасетов' });
   const inc = incidentDetail(d, req.params.id);
   if (!inc) return res.status(404).json({ error: 'инцидент не найден', detail: req.params.id });
-  // Fast-fail guard: probe the local daemon (1.5s) before the full report
-  // generation so an unreachable Ollama falls back to the deterministic mock in
-  // <3s instead of blocking on the chat timeout.
-  if (!(await ollamaUp())) {
-    return res.json({ id: inc.id, mode: 'mock', detail: 'ollama недоступна (probe)', text: mockReport(inc) });
+  // Fast-fail guard: probe model readiness (1.5s) before the full report
+  // generation so an unreachable Ollama OR an un-pulled model falls back to the
+  // deterministic mock in <3s instead of a 404'd generation / chat timeout.
+  if (!(await ollamaModelReady())) {
+    return res.json({ id: inc.id, mode: 'mock', detail: `локальная модель ${OLLAMA_MODEL} не готова (демон недоступен или модель не скачана)`, text: mockReport(inc) });
   }
   try {
     const text = await ollamaReport(inc);
