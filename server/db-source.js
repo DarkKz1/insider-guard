@@ -10,7 +10,6 @@
 // table — only the driver changes (node:sqlite → pg). The query shape (read new
 // rows since a cursor) is identical, so streaming/CDC is a driver swap.
 
-const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
 
@@ -19,6 +18,11 @@ const DB_FILE = process.env.DB_SQLITE_PATH || path.join(__dirname, '..', 'data',
 let _db = null;
 function db() {
   if (_db) return _db;
+  // LAZY: node:sqlite only exists on Node 22.5+. Requiring it at module load
+  // crashes the whole serverless function on Vercel's Node 20 (FUNCTION_INVOCATION_FAILED).
+  // Deferring here keeps require('./db-source') safe everywhere; the watcher
+  // (which calls db()) only runs on a long-lived host (local/Railway), where Node is 22+.
+  const { DatabaseSync } = require('node:sqlite');
   fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
   _db = new DatabaseSync(DB_FILE);
   _db.exec(`
